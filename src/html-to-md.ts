@@ -41,13 +41,13 @@ export class HtmlToMarkdownConverter {
 		 * 转为: [[页面标题]]
 		 */
 		this.turndown.addRule("confluenceLink", {
-			filter: (node) => {
+			filter: (node: any) => {
 				return (
 					node.nodeName === "AC:LINK" ||
 					node.nodeName === "AC-LINK"
 				);
 			},
-			replacement: (content, node) => {
+			replacement: (content: string, node: any) => {
 				// 尝试从子元素获取页面标题
 				const pageRef = node.querySelector("ri\\:page, ri-page");
 				if (pageRef) {
@@ -77,19 +77,19 @@ export class HtmlToMarkdownConverter {
 		 * <ac:structured-macro ac:name="drawio"> 标签处理
 		 */
 		this.turndown.addRule("drawioMacro", {
-			filter: (node) => {
+			filter: (node: any) => {
 				if (node.nodeName !== "AC:STRUCTURED-MACRO" && node.nodeName !== "AC-STRUCTURED-MACRO") {
 					return false;
 				}
 				const macroName = node.getAttribute("ac:name") || node.getAttribute("name");
 				return macroName === "drawio" || macroName === "gliffy";
 			},
-			replacement: (content, node) => {
+			replacement: (content: string, node: any) => {
 				// 尝试获取图表名称
 				const params = node.querySelectorAll("ac\\:parameter, ac-parameter");
 				let diagramName = "图表";
 				
-				params.forEach((param) => {
+				params.forEach((param: any) => {
 					const paramName = param.getAttribute("ac:name") || param.getAttribute("name");
 					if (paramName === "diagramName" || paramName === "name") {
 						diagramName = param.textContent?.trim() || "图表";
@@ -111,14 +111,14 @@ export class HtmlToMarkdownConverter {
 		 * <ac:structured-macro ac:name="info|warning|tip|note"> 标签处理
 		 */
 		this.turndown.addRule("panelMacro", {
-			filter: (node) => {
+			filter: (node: any) => {
 				if (node.nodeName !== "AC:STRUCTURED-MACRO" && node.nodeName !== "AC-STRUCTURED-MACRO") {
 					return false;
 				}
 				const macroName = node.getAttribute("ac:name") || node.getAttribute("name");
 				return ["info", "warning", "tip", "note"].includes(macroName || "");
 			},
-			replacement: (content, node) => {
+			replacement: (content: string, node: any) => {
 				const macroName = node.getAttribute("ac:name") || node.getAttribute("name");
 				const richBody = node.querySelector("ac\\:rich-text-body, ac-rich-text-body");
 				const bodyContent = richBody?.innerHTML || content;
@@ -143,13 +143,13 @@ export class HtmlToMarkdownConverter {
 		 * <ac:link> 包含 <ri:user> 处理
 		 */
 		this.turndown.addRule("userMention", {
-			filter: (node) => {
+			filter: (node: any) => {
 				if (node.nodeName !== "AC:LINK" && node.nodeName !== "AC-LINK") {
 					return false;
 				}
 				return !!node.querySelector("ri\\:user, ri-user");
 			},
-			replacement: (content, node) => {
+			replacement: (content: string, node: any) => {
 				const userRef = node.querySelector("ri\\:user, ri-user");
 				if (userRef) {
 					const username = userRef.getAttribute("ri:username") ||
@@ -180,14 +180,14 @@ export class HtmlToMarkdownConverter {
 				];
 				return tagsToUnwrap.includes(nodeName);
 			},
-			replacement: (content) => {
+			replacement: (content: string) => {
 				return content || "";
 			},
 		});
 
 		// ==================== 8. 移除空段落 ====================
 		this.turndown.addRule("removeEmptyParagraphs", {
-			filter: (node) => {
+			filter: (node: any) => {
 				return (
 					node.nodeName === "P" &&
 					(!node.textContent || node.textContent.trim() === "")

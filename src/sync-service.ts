@@ -151,22 +151,24 @@ export class SyncService {
 						(match, key) => `<a href="https://jira.ykeey.cn/browse/${key.trim()}">${key.trim()}</a>`
 					);
 
-					// 3. 预处理代码块：提取语言和 CDATA 中的代码，转换为标准 HTML
+					// 3. 预处理代码块：剥离 CDATA，并进行实体转义，防止 XML 标签被 DOMParser 吞噬
 					htmlContent = htmlContent.replace(
 						/<ac:structured-macro[^>]*ac:name="code"[^>]*>([\s\S]*?)<\/ac:structured-macro>/gi,
 						(match, innerContent) => {
-							// 提取语言 (容错：可能没有 language 参数)
 							const langMatch = innerContent.match(/<ac:parameter[^>]*ac:name="language"[^>]*>([\s\S]*?)<\/ac:parameter>/i);
 							const lang = langMatch ? langMatch[1].trim() : '';
 
-							// 提取正文
 							const bodyMatch = innerContent.match(/<ac:plain-text-body>([\s\S]*?)<\/ac:plain-text-body>/i);
 							let code = bodyMatch ? bodyMatch[1] : '';
-
-							// 剥离 CDATA 包装，保留原始换行
+							
+							// 1. 剥离 CDATA
 							code = code.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1");
 							
-							// 转换为标准 HTML 代码块，Turndown 的默认规则会自动完美处理它
+							// 2. 【关键修复】HTML 实体转义，保护 XML 尖括号不被解析为 DOM 节点
+							code = code.replace(/&/g, '&amp;')
+							           .replace(/</g, '&lt;')
+							           .replace(/>/g, '&gt;');
+							
 							return `\n<pre><code class="language-${lang}">${code}</code></pre>\n`;
 						}
 					);
