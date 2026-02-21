@@ -1,0 +1,273 @@
+/**
+ * Confluence Sync Plugin - 主入口
+ * 
+ * 功能：从私有部署的 Confluence 单向同步页面到 Obsidian
+ * 特点：
+ * - 使用 CQL 查询获取指定根节点及其所有子节点
+ * - 基于 ancestors 重构目录树，保持层级结构
+ * - 支持增量同步（基于 lastModified 时间）
+ * - 支持附件下载
+ * - 使用 Turndown 转换 HTML 到 Markdown
+ */
+import { Plugin, Notice, TAbstractFile, TFile, addIcon } from "obsidian";
+import {
+	ConfluenceSyncSettings,
+	DEFAULT_SETTINGS,
+	ConfluenceSyncSettingTab,
+} from "./src/settings";
+import { SyncStateManager, PluginData, DEFAULT_PLUGIN_DATA } from "./src/sync-state";
+import { ConfluenceApiClient } from "./src/confluence-api";
+import { SyncService } from "./src/sync-service";
+
+/**
+ * 插件主类
+ */
+export default class ConfluenceSyncPlugin extends Plugin {
+	settings: ConfluenceSyncSettings;
+	private stateManager: SyncStateManager;
+	private apiClient: ConfluenceApiClient;
+	private syncService: SyncService;
+
+	/**
+	 * 插件加载
+	 */
+	async onload(): Promise<void> {
+		console.log("[Confluence Sync] 插件加载中...");
+
+		// 加载设置
+		await this.loadSettings();
+
+		// 初始化状态管理器
+		await this.initializeStateManager();
+
+		// 初始化 API 客户端
+		this.initializeApiClient();
+
+		// 初始化同步服务
+		this.syncService = new SyncService(
+			this.app,
+			this.settings,
+			this.apiClient,
+			this.stateManager
+		);
+
+		// 添加设置面板
+		this.addSettingTab(new ConfluenceSyncSettingTab(this.app, this));
+
+		// 添加命令
+		this.addCommands();
+
+		// 添加侧边栏图标
+		this.setupRibbonIcon();
+
+		console.log("[Confluence Sync] 插件加载完成");
+	}
+
+	/**
+	 * 插件卸载
+	 */
+	onunload(): void {
+		console.log("[Confluence Sync] 插件已卸载");
+	}
+
+	/**
+	 * 加载设置
+	 */
+	async loadSettings(): Promise<void> {
+		this.settings = Object.assign(
+			{},
+			DEFAULT_SETTINGS,
+			await this.loadData()
+		);
+	}
+
+	/**
+	 * 保存设置
+	 */
+	async saveSettings(): Promise<void> {
+		await this.saveData(this.settings);
+		// 更新同步服务的设置引用
+		this.syncService?.updateSettings(this.settings);
+		// 重新初始化 API 客户端（配置可能已变更）
+		this.initializeApiClient();
+	}
+
+	/**
+	 * 初始化状态管理器
+	 */
+	private async initializeStateManager(): Promise<void> {
+		// 从 data.json 加载同步状态
+		const savedData = await this.loadData();
+		const pluginData: PluginData = {
+			...DEFAULT_PLUGIN_DATA,
+			...(savedData?.syncState ? { syncState: savedData.syncState } : {}),
+			...(savedData?.lastGlobalSyncTime ? { lastGlobalSyncTime: savedData.lastGlobalSyncTime } : {}),
+		};
+
+		this.stateManager = new SyncStateManager(pluginData, async () => {
+			// 保存状态到 data.json
+			const currentData = await this.loadData();
+			await this.saveData({
+				...currentData,
+				...this.stateManager.getData(),
+			});
+		});
+	}
+
+	/**
+	 * 初始化 API 客户端
+	 */
+	private initializeApiClient(): void {
+		this.apiClient = new ConfluenceApiClient({
+			baseUrl: this.settings.confluenceBaseUrl,
+			username: this.settings.username,
+			password: this.settings.password,
+		});
+	}
+
+	/**
+	 * 添加命令
+	 */
+	private addCommands(): void {
+		// 手动同步命令
+		this.addCommand({
+			id: "sync-from-confluence",
+			name: "从 Confluence 同步",
+			callback: async () => {
+				await this.syncFromConfluence();
+			},
+		});
+
+		// 强制全量同步命令
+		this.addCommand({
+			id: "force-full-sync",
+			name: "强制全量同步（忽略同步状态）",
+			callback: async () => {
+				const confirmed = confirm(
+					"确定要执行全量同步吗？这将重新下载所有页面内容。"
+				);
+				if (confirmed) {
+					await this.syncService.resetSyncState();
+					new Notice("同步状态已重置，开始全量同步...");
+					await this.syncFromConfluence();
+				}
+			},
+		});
+
+		// 查看同步统计
+		this.addCommand({
+			id: "show-sync-stats",
+			name: "显示同步统计",
+			callback: () => {
+				const stats = this.syncService.getSyncStats();
+				const lastSyncText = stats.lastSyncTime
+					? new Date(stats.lastSyncTime).toLocaleString()
+					: "从未";
+				
+				new Notice(
+					`📊 同步统计\n已同步页面: ${stats.totalSyncedPages}\n上次同步: ${lastSyncText}`,
+					10000
+				);
+			},
+		});
+	}
+
+	/**
+	 * 初始化侧边栏图标
+	 */
+	private setupRibbonIcon(): void {
+		// 添加同步图标到侧边栏
+		this.addRibbonIcon(
+			"refresh-cw",  // Obsidian 内置图标
+			"从 Confluence 同步",
+			async () => {
+				await this.syncFromConfluence();
+			}
+		);
+	}
+
+	/**
+	 * 执行同步（供外部调用）
+	 */
+	async syncFromConfluence(): Promise<void> {
+		// 验证配置
+		if (!this.validateSettings()) {
+			return;
+		}
+
+		const notice = new Notice("🔄 正在从 Confluence 同步...", 0);
+
+		try {
+			const result = await this.syncService.pullFromConfluence();
+			notice.hide();
+
+			if (result.success) {
+				const message = [
+					"✅ 同步完成！",
+					`新建: ${result.pagesCreated} 页`,
+					`更新: ${result.pagesUpdated} 页`,
+					`跳过: ${result.pagesSkipped} 页`,
+					`附件: ${result.attachmentsDownloaded} 个`,
+				].join("\n");
+				new Notice(message, 5000);
+			} else {
+				const errorMsg = result.errors.join("; ").substring(0, 100);
+				new Notice(`❌ 同步失败: ${errorMsg}...`, 5000);
+			}
+		} catch (error) {
+			notice.hide();
+			console.error("[Confluence Sync] 同步错误:", error);
+			new Notice(`❌ 同步错误: ${error.message}`, 5000);
+		}
+	}
+
+	/**
+	 * 测试连接（供设置面板调用）
+	 */
+	async testConnection(): Promise<void> {
+		if (!this.settings.confluenceBaseUrl) {
+			throw new Error("请配置 Confluence 地址");
+		}
+		if (!this.settings.username || !this.settings.password) {
+			throw new Error("请配置用户名和密码");
+		}
+
+		await this.apiClient.testConnection();
+	}
+
+	/**
+	 * 重置同步状态（供设置面板调用）
+	 */
+	async resetSyncState(): Promise<void> {
+		await this.syncService.resetSyncState();
+	}
+
+	/**
+	 * 获取同步统计（供设置面板调用）
+	 */
+	getSyncStats(): {
+		totalSyncedPages: number;
+		lastSyncTime: number;
+	} {
+		return this.syncService.getSyncStats();
+	}
+
+	/**
+	 * 验证设置是否完整
+	 */
+	private validateSettings(): boolean {
+		if (!this.settings.confluenceBaseUrl) {
+			new Notice("❌ 请在设置中配置 Confluence 地址");
+			return false;
+		}
+		if (!this.settings.username || !this.settings.password) {
+			new Notice("❌ 请在设置中配置用户名和密码");
+			return false;
+		}
+		if (!this.settings.rootPageIds.trim()) {
+			new Notice("❌ 请在设置中配置根页面 ID");
+			return false;
+		}
+		return true;
+	}
+}
