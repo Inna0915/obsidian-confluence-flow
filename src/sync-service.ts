@@ -220,7 +220,28 @@ export class SyncService {
 						}
 					);
 
-					// 3. 预处理代码块：剥离 CDATA，并进行实体转义，防止 XML 标签被 DOMParser 吞噬
+					// 3. 预处理 Draw.io 图表：提取图表文件名，复用 obsidian-img 标签生成双链
+					htmlContent = htmlContent.replace(
+						/<ac:structured-macro[^>]*ac:name="drawio"[^>]*>([\s\S]*?)<\/ac:structured-macro>/gi,
+						(match, innerContent) => {
+							// Draw.io 宏通常将文件名存放在 diagramName 参数中
+							const nameMatch = innerContent.match(/<ac:parameter[^>]*ac:name="diagramName"[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/ac:parameter>/i);
+							
+							if (nameMatch && nameMatch[1]) {
+								const diagramName = nameMatch[1].trim();
+								// 拼接出本地保存的附件文件名
+								const localFileName = `${safePageTitle}_${this.sanitizeFileName(diagramName)}`;
+								
+								// 直接伪装成图片 span，复用已有的 Turndown 规则输出 ![[文件名]]
+								return `<span class="obsidian-img" data-filename="${localFileName}"></span>`;
+							}
+							
+							// 如果没有提取到名称，返回空字符串以清除毫无意义的占位文本
+							return '';
+						}
+					);
+
+					// 4. 预处理代码块：剥离 CDATA，并进行实体转义，防止 XML 标签被 DOMParser 吞噬
 					htmlContent = htmlContent.replace(
 						/<ac:structured-macro[^>]*ac:name="code"[^>]*>([\s\S]*?)<\/ac:structured-macro>/gi,
 						(match, innerContent) => {
