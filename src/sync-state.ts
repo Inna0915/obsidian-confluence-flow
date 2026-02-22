@@ -24,6 +24,8 @@ export interface PluginData {
 	syncState: Record<string, PageSyncState>;
 	// 上次全局同步时间戳（用于增量同步的 CQL 查询）
 	lastGlobalSyncTime: number;
+	// 已经进行过首次全量拉取的 Root ID 列表
+	syncedRootIds: string[];
 }
 
 /**
@@ -32,6 +34,7 @@ export interface PluginData {
 export const DEFAULT_PLUGIN_DATA: PluginData = {
 	syncState: {},
 	lastGlobalSyncTime: 0,
+	syncedRootIds: [],
 };
 
 /**
@@ -126,11 +129,29 @@ export class SyncStateManager {
 	}
 
 	/**
+	 * 获取已同步的 Root ID 列表
+	 */
+	getSyncedRootIds(): string[] {
+		return [...this.data.syncedRootIds];
+	}
+
+	/**
+	 * 添加已同步的 Root ID
+	 */
+	async addSyncedRootIds(ids: string[]): Promise<void> {
+		const currentSet = new Set(this.data.syncedRootIds);
+		ids.forEach(id => currentSet.add(id));
+		this.data.syncedRootIds = Array.from(currentSet);
+		await this.saveCallback();
+	}
+
+	/**
 	 * 清空所有同步状态（谨慎使用）
 	 */
 	async clearAllStates(): Promise<void> {
 		this.data.syncState = {};
 		this.data.lastGlobalSyncTime = 0;
+		this.data.syncedRootIds = [];
 		await this.saveCallback();
 	}
 }

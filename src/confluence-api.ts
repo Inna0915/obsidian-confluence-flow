@@ -354,6 +354,11 @@ export class ConfluenceApiClient {
 		rootIds: string[],
 		lastSyncTime?: number
 	): Promise<ConfluencePage[]> {
+		// 如果 rootIds 为空，直接返回空数组，避免发送非法 CQL
+		if (rootIds.length === 0) {
+			return [];
+		}
+
 		const allPages: ConfluencePage[] = [];
 		let start = 0;
 		const limit = 25;

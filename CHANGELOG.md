@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- 修复新增 Root ID 时增量同步失效的问题 - 现在新加入的页面树会进行首次全量拉取
+- 修复 Jira 宏解析问题 - 支持 key、jql 参数以及 CDATA 包裹等各种变体
+- 修复 XML 代码块内容错乱问题 - 添加 HTML 实体转义保护尖括号
+
+### Improved
+- 增强 Jira 链接提取的健壮性 - 三级兜底策略确保提取到 Issue Key
+
 ## [1.0.0] - 2026-02-21
 
 ### Added

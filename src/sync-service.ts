@@ -74,18 +74,50 @@ export class SyncService {
 		};
 
 		try {
-			// 1. 解析根页面 ID 列表
-			const rootIds = this.parseRootPageIds(this.settings.rootPageIds);
-			if (rootIds.length === 0) {
+			// 1. 获取用户配置的所有 Root IDs
+			const allRootIds = this.parseRootPageIds(this.settings.rootPageIds);
+			if (allRootIds.length === 0) {
 				throw new Error("未配置根页面 ID，请在设置中输入要同步的页面 ID");
 			}
 
 			// 2. 确保同步文件夹和附件文件夹存在
 			await this.ensureSyncFolders();
 
-			// 3. 获取需要同步的页面列表（CQL 查询）
-			const lastSyncTime = this.stateManager.getLastGlobalSyncTime();
-			const pages = await this.apiClient.fetchAllPagesByRootIds(rootIds, lastSyncTime);
+			// 3. 【关键修复】新老 Root ID 分流处理
+			const syncedRootIds = this.stateManager.getSyncedRootIds();
+			
+			// 计算全新 ID 和已同步 ID
+			const newRootIds = allRootIds.filter(id => !syncedRootIds.includes(id));
+			const existingRootIds = allRootIds.filter(id => syncedRootIds.includes(id));
+			
+			if (newRootIds.length > 0) {
+				console.log(`[Confluence Sync] 新增 Root IDs: ${newRootIds.join(', ')}`);
+			}
+			if (existingRootIds.length > 0) {
+				console.log(`[Confluence Sync] 已同步 Root IDs: ${existingRootIds.join(', ')}`);
+			}
+
+			let pages: ConfluencePage[] = [];
+
+			// 4. 对老的 ID，带上 lastSyncTime 进行增量查询
+			if (existingRootIds.length > 0) {
+				const lastSyncTime = this.stateManager.getLastGlobalSyncTime();
+				const existingPages = await this.apiClient.fetchAllPagesByRootIds(existingRootIds, lastSyncTime);
+				pages = pages.concat(existingPages);
+				console.log(`[Confluence Sync] 增量查询返回 ${existingPages.length} 个页面`);
+			}
+
+			// 5. 对全新的 ID，不带 lastSyncTime，进行首次全量查询
+			if (newRootIds.length > 0) {
+				const newPages = await this.apiClient.fetchAllPagesByRootIds(newRootIds, 0);
+				pages = pages.concat(newPages);
+				console.log(`[Confluence Sync] 全量查询返回 ${newPages.length} 个页面`);
+			}
+
+			// 6. 去重处理（防止同一个页面在两棵树里有交集）
+			const uniquePagesMap = new Map<string, ConfluencePage>();
+			pages.forEach(p => uniquePagesMap.set(p.id, p));
+			pages = Array.from(uniquePagesMap.values());
 
 			if (pages.length === 0) {
 				new Notice("没有需要同步的新内容");
@@ -145,10 +177,47 @@ export class SyncService {
 						}
 					}
 
-					// 2. Jira：直接转换为标准 HTML 超链接 (Turndown 会原生处理)
+					// 2. 预处理 Jira：增强版解析，支持 key、jql 以及 CDATA 和各种变体
 					htmlContent = htmlContent.replace(
-						/<ac:structured-macro[^>]*ac:name="jira"[^>]*>[\s\S]*?<ac:parameter[^>]*ac:name="key"[^>]*>([^<]+)<\/ac:parameter>[\s\S]*?<\/ac:structured-macro>/gi,
-						(match, key) => `<a href="https://jira.ykeey.cn/browse/${key.trim()}">${key.trim()}</a>`
+						/<ac:structured-macro[^>]*ac:name="jira"[^>]*>([\s\S]*?)<\/ac:structured-macro>/gi,
+						(match, innerContent) => {
+							let issueKey = "";
+
+							// 尝试 1：直接从 key 参数提取
+							const keyMatch = innerContent.match(/<ac:parameter[^>]*ac:name="key"[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/ac:parameter>/i);
+							if (keyMatch && keyMatch[1]) {
+								issueKey = keyMatch[1].trim();
+							}
+
+							// 尝试 2：如果没找到 key，可能用的是 jql 参数 (如 issueKey="PDSTDTTA-7811" 或 key=PDSTDTTA-7811)
+							if (!issueKey) {
+								const jqlMatch = innerContent.match(/<ac:parameter[^>]*ac:name="jql"[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/ac:parameter>/i);
+								if (jqlMatch && jqlMatch[1]) {
+									const jql = jqlMatch[1];
+									const extractMatch = jql.match(/(?:issuekey|key)\s*[=in]\s*["']?([A-Z0-9]+-\d+)["']?/i);
+									if (extractMatch && extractMatch[1]) {
+										issueKey = extractMatch[1].trim();
+									}
+								}
+							}
+
+							// 尝试 3：暴力兜底，直接在宏内容中用正则寻找形如 ABCD-1234 的 Jira 任务号
+							if (!issueKey) {
+								const fallbackMatch = innerContent.match(/[A-Z0-9]+-\d+/i);
+								if (fallbackMatch) {
+									issueKey = fallbackMatch[0].toUpperCase();
+								}
+							}
+
+							// 如果成功提取到 Key，清理可能残留的特殊字符并转换为标准 <a> 标签
+							if (issueKey) {
+								issueKey = issueKey.replace(/[^A-Z0-9-]/gi, ''); // 清理多余的引号等杂质
+								return `<a href="https://jira.ykeey.cn/browse/${issueKey}">${issueKey}</a>`;
+							}
+
+							// 如果实在提取不出来，返回原内容
+							return match;
+						}
 					);
 
 					// 3. 预处理代码块：剥离 CDATA，并进行实体转义，防止 XML 标签被 DOMParser 吞噬
@@ -218,7 +287,13 @@ export class SyncService {
 				}
 			}
 
-			// 6. 更新全局同步时间
+			// 7. 【关键】同步完成后，将新 Root ID 标记为已同步
+			if (newRootIds.length > 0) {
+				await this.stateManager.addSyncedRootIds(newRootIds);
+				console.log(`[Confluence Sync] 已将 ${newRootIds.length} 个 Root ID 标记为已同步`);
+			}
+			
+			// 8. 更新全局同步时间
 			await this.stateManager.updateLastGlobalSyncTime();
 			result.success = result.errors.length === 0;
 
