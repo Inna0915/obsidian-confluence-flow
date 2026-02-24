@@ -372,17 +372,17 @@ export class ConfluenceApiClient {
 				limit
 			);
 
+			console.log(`[Confluence Sync] 分页请求: start=${start}, limit=${limit}`);
+			console.log(`[Confluence Sync] 返回: results.length=${result.results.length}, size=${result.size}, _totalSize=${result._totalSize}, start=${result.start}, limit=${result.limit}`);
+
 			allPages.push(...result.results);
 
-			// 检查是否还有更多数据
-			hasMore = result.size === limit && allPages.length < result._totalSize;
-			start += limit;
+			// 用服务端实际返回的 limit 判断（服务端可能强制缩小 limit）
+			const serverLimit = result.limit || limit;
+			hasMore = result.results.length >= serverLimit;
+			start += result.results.length;
 
-			// 安全限制：最多获取 1000 个页面
-			if (allPages.length >= 1000) {
-				console.warn("[Confluence Sync] 达到最大页面获取限制 (1000)");
-				break;
-			}
+			console.log(`[Confluence Sync] 累计: ${allPages.length} 页, hasMore=${hasMore}`);
 		}
 
 		return allPages;

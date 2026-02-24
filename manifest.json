@@ -1,7 +1,7 @@
 {
 	"id": "confluence-sync",
 	"name": "Confluence Sync",
-	"version": "1.1.0",
+	"version": "1.2.0",
 	"minAppVersion": "0.15.0",
 	"description": "从 Confluence 单向同步页面到 Obsidian，支持树形结构和附件下载",
 	"author": "Inna0915",

@@ -7,6 +7,7 @@
 - 🌲 **树形结构同步** - 基于 Confluence 的 ancestors 关系重构层级目录，智能判断父/子页面文件夹结构
 - ⚡ **增量同步** - 基于 `lastModified` 时间戳，只同步变更内容；新 Root ID 首次自动全量同步
 - 📎 **附件下载** - 自动下载页面附件，本地缓存跳过已下载文件，避免重复下载大文件
+- 📋 **复杂表格** - 保留含合并单元格(colspan/rowspan)的原始 HTML 表格
 - 🔄 **增量更新** - 记录同步状态，避免重复下载未变更页面
 - 🏷️ **元数据保留** - 在 YAML Frontmatter 中保存 Confluence 页面 ID、版本号、同步时间等信息
 - 🎨 **富媒体转换** - 支持代码块、图片、Jira 链接、Draw.io 图表、信息面板等 Confluence 宏转换为 Markdown
@@ -78,6 +79,7 @@ ConfluenceSync/
 |--------------|---------------|------|
 | 代码块 | 围栏式代码块 ```language\ncode\n``` | 支持 XML/HTML 代码实体转义 |
 | 图片 | Obsidian 双链 `![[filename.png]]` | 使用占位符策略避免 Turndown 转义问题 |
+| 复杂表格 | 原始 HTML `<table>` | 保留 colspan/rowspan 合并单元格 |
 | Jira 链接 | 外部链接 `[KEY](https://jira...)` | 支持 key/jql 参数、CDATA 包裹自动提取 |
 | Draw.io 图表 | Obsidian 双链 `![[filename.drawio]]` | 自动提取图表文件名并关联附件 |
 | 信息面板 | 引用块 `> **INFO** ...` | 支持 info/warning/tip/note |
@@ -126,8 +128,10 @@ ConfluenceSync/
 
 ## 更新日志
 
-### 最新改进（未发布）
+### 最新改进（v1.2.0）
 
+- ✅ **新增** 文件夹路径自动补全 - 设置面板输入路径时提供智能建议
+- ✅ **新增** 复杂表格支持 - 保留含合并单元格的原始 HTML 表格
 - ✅ 修复新增 Root ID 时增量同步失效的问题 - 新加入的页面树会进行首次全量拉取
 - ✅ 修复 Jira 宏解析问题 - 支持 key、jql 参数以及 CDATA 包裹等各种变体
 - ✅ 修复 XML 代码块内容错乱问题 - 添加 HTML 实体转义保护尖括号

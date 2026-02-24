@@ -3,6 +3,7 @@
  */
 import { App, PluginSettingTab, Setting, Notice } from "obsidian";
 import ConfluenceSyncPlugin from "../main";
+import { FolderSuggest } from "./utils/FolderSuggest";
 
 /**
  * 插件设置接口
@@ -27,7 +28,7 @@ export const DEFAULT_SETTINGS: ConfluenceSyncSettings = {
 	confluenceBaseUrl: "",
 	username: "",
 	password: "",
-	syncFolder: "ConfluenceSync",
+	syncFolder: "21_工作/ConfluenceSync",
 	rootPageIds: "",
 };
 
@@ -95,15 +96,15 @@ export class ConfluenceSyncSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("同步文件夹")
 			.setDesc("Confluence 页面同步到 Obsidian 的目标文件夹路径")
-			.addText((text) =>
-				text
-					.setPlaceholder("ConfluenceSync")
-					.setValue(this.plugin.settings.syncFolder)
-					.onChange(async (value) => {
-						this.plugin.settings.syncFolder = value.trim() || "ConfluenceSync";
-						await this.plugin.saveSettings();
-					})
-			);
+			.addText((text) => {
+				text.setPlaceholder("输入或选择文件夹路径...");
+				text.setValue(this.plugin.settings.syncFolder);
+				new FolderSuggest(this.app, text.inputEl);
+				text.onChange(async (value) => {
+					this.plugin.settings.syncFolder = value.trim() || "21_工作/ConfluenceSync";
+					await this.plugin.saveSettings();
+				});
+			});
 
 		// 根页面 ID 列表设置
 		new Setting(containerEl)

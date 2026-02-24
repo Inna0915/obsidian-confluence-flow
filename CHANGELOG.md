@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-02-24
+
+### Added
+- 新增文件夹路径自动补全 - 设置面板输入同步文件夹时提供路径建议
+- 新增复杂表格支持 - 保留含 colspan/rowspan 的原始 HTML 表格
+
+### Changed
+- 优化分页日志输出 - 更清晰的调试信息
+- 改进分页逻辑 - 使用服务端实际返回的 limit 判断
+- 更新默认同步路径为 `21_工作/ConfluenceSync`
+
 ## [1.1.0] - 2026-02-24
 
 ### Added

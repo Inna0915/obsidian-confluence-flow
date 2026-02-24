@@ -164,6 +164,21 @@ export class SyncService {
 					const safePageTitle = this.sanitizeFileName(page.title);
 					let htmlContent = page.body.storage.value;
 
+					// 0. 复杂表格（含合并单元格）保留原始 HTML，Obsidian 可直接渲染
+					const tablePlaceholders: Map<string, string> = new Map();
+					let tablePlaceholderIdx = 0;
+					htmlContent = htmlContent.replace(
+						/<table[^>]*>[\s\S]*?<\/table>/gi,
+						(match) => {
+							if (/(?:colspan|rowspan)\s*=\s*["']\d+["']/i.test(match)) {
+								const placeholder = `%%CFLTBL${tablePlaceholderIdx++}%%`;
+								tablePlaceholders.set(placeholder, match);
+								return placeholder;
+							}
+							return match;
+						}
+					);
+
 					// 1. 使用纯文本占位符（完全绕过 Turndown DOM 解析和转义）
 					const imagePlaceholders: Map<string, string> = new Map();
 					let imgPlaceholderIdx = 0;
@@ -319,6 +334,11 @@ export class SyncService {
 					// 后处理：将页面链接占位符还原为双链
 					for (const [placeholder, link] of linkPlaceholders) {
 						markdownContent = markdownContent.replace(placeholder, link);
+					}
+
+					// 后处理：将复杂表格占位符还原为原始 HTML（包裹可滚动容器）
+					for (const [placeholder, tableHtml] of tablePlaceholders) {
+						markdownContent = markdownContent.replace(placeholder, `\n<div style="overflow-x:auto">\n${tableHtml}\n</div>\n`);
 					}
 
 					// 写入文件
