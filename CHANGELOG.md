@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-02-24
+
+### Added
+- Draw.io 图表同时支持 `.drawio` 和 `.png` 双格式占位符
+
+### Fixed
+- 添加 Confluence 地址空值检查，未配置时给出明确错误提示
+
 ## [1.2.0] - 2026-02-24
 
 ### Added

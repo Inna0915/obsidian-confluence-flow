@@ -274,9 +274,12 @@ export class SyncService {
 									let diagramName = diagMatch[1].trim();
 									if (!diagramName.includes('.')) diagramName += '.drawio';
 									const localFileName = `${safePageTitle}_${this.sanitizeFileName(diagramName)}`;
-									const placeholder = `%%CFLIMG${imgPlaceholderIdx++}%%`;
-									imagePlaceholders.set(placeholder, localFileName);
-									return placeholder;
+									const pngFileName = `${safePageTitle}_${this.sanitizeFileName(diagMatch[1].trim())}.png`;
+									const p1 = `%%CFLIMG${imgPlaceholderIdx++}%%`;
+									const p2 = `%%CFLIMG${imgPlaceholderIdx++}%%`;
+									imagePlaceholders.set(p1, localFileName);
+									imagePlaceholders.set(p2, pngFileName);
+									return `${p1}\n${p2}`;
 								}
 								return '';
 							}

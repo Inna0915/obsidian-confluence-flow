@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-confluence-sync",
-	"version": "1.2.0",
+	"version": "1.2.1",
 	"description": "Obsidian plugin for syncing Confluence pages",
 	"main": "main.js",
 	"scripts": {

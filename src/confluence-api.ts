@@ -105,6 +105,9 @@ export class ConfluenceApiClient {
 	 * 清理基础 URL，去除末尾的斜杠
 	 */
 	private getCleanBaseUrl(): string {
+		if (!this.config.baseUrl?.trim()) {
+			throw new Error("Confluence 地址未配置，请在设置中填写");
+		}
 		// 使用正则去除末尾的一个或多个斜杠
 		return this.config.baseUrl.replace(/\/+$/, "");
 	}
