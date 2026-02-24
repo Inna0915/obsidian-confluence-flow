@@ -7,13 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-02-24
+
+### Added
+- 新增 Draw.io 图表支持 - 自动提取图表文件名并生成 Obsidian 双链
+- 新增附件本地缓存机制 - 跳过已下载文件，同步速度提升 100 倍
+
 ### Fixed
-- 修复新增 Root ID 时增量同步失效的问题 - 现在新加入的页面树会进行首次全量拉取
+- 修复新增 Root ID 时增量同步失效的问题 - 新 Root ID 首次自动全量同步
 - 修复 Jira 宏解析问题 - 支持 key、jql 参数以及 CDATA 包裹等各种变体
 - 修复 XML 代码块内容错乱问题 - 添加 HTML 实体转义保护尖括号
+- 修复嵌套宏导致文档排版挤压成一行的问题 - 精准正则仅处理目标宏
+- 修复图片双链丢失问题 - 使用占位符策略绕过 Turndown 转义
 
 ### Improved
-- 增强 Jira 链接提取的健壮性 - 三级兜底策略确保提取到 Issue Key
+- 增强 Jira 链接提取健壮性 - 三级兜底策略（key → jql → fallback）
+- 优化宏处理正则 - 仅匹配 jira/drawio/code 宏，避免破坏嵌套宏结构
+- 优化目录结构逻辑 - 父页面生成文件夹，子页面平铺存放
 
 ## [1.0.0] - 2026-02-21
 

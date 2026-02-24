@@ -273,7 +273,7 @@ export class ConfluenceApiClient {
 		const baseUrl = this.getCleanBaseUrl();
 		const encodedCql = encodeURIComponent(cql);
 		// expand 参数不使用 encodeURIComponent，因为逗号需要保留
-		const expand = "body.storage,version,ancestors";
+		const expand = "body.storage,version,ancestors,children.attachment";
 		const url = `${baseUrl}/rest/api/content/search?cql=${encodedCql}&expand=${expand}&start=${start}&limit=${limit}`;
 
 		console.log("[Confluence Sync] CQL:", cql);
@@ -361,7 +361,7 @@ export class ConfluenceApiClient {
 
 		const allPages: ConfluencePage[] = [];
 		let start = 0;
-		const limit = 25;
+		const limit = 100;
 		let hasMore = true;
 
 		while (hasMore) {

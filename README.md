@@ -4,12 +4,12 @@
 
 ## 功能特性
 
-- 🌲 **树形结构同步** - 基于 Confluence 的 ancestors 关系重构层级目录
-- ⚡ **增量同步** - 基于 `lastModified` 时间戳，只同步变更内容
-- 📎 **附件下载** - 自动下载页面附件，保持文件关联
+- 🌲 **树形结构同步** - 基于 Confluence 的 ancestors 关系重构层级目录，智能判断父/子页面文件夹结构
+- ⚡ **增量同步** - 基于 `lastModified` 时间戳，只同步变更内容；新 Root ID 首次自动全量同步
+- 📎 **附件下载** - 自动下载页面附件，本地缓存跳过已下载文件，避免重复下载大文件
 - 🔄 **增量更新** - 记录同步状态，避免重复下载未变更页面
-- 🏷️ **元数据保留** - 在 YAML Frontmatter 中保存 Confluence 页面 ID、版本号等信息
-- 🎨 **富媒体转换** - 支持代码块、图片、Jira 链接等 Confluence 宏转换为 Markdown
+- 🏷️ **元数据保留** - 在 YAML Frontmatter 中保存 Confluence 页面 ID、版本号、同步时间等信息
+- 🎨 **富媒体转换** - 支持代码块、图片、Jira 链接、Draw.io 图表、信息面板等 Confluence 宏转换为 Markdown
 
 ## 安装
 
@@ -74,13 +74,14 @@ ConfluenceSync/
 
 ## 支持的 Confluence 宏
 
-| Confluence 宏 | Markdown 输出 |
-|--------------|---------------|
-| 代码块 | 围栏式代码块 ```language\ncode\n``` |
-| 图片 | Obsidian 双链 `![[filename.png]]` |
-| Jira 链接 | 外部链接 `[KEY](https://jira...)` |
-| 信息面板 | 引用块 `> **INFO** ...` |
-| 双链 | 内部链接 `[[页面标题]]` |
+| Confluence 宏 | Markdown 输出 | 说明 |
+|--------------|---------------|------|
+| 代码块 | 围栏式代码块 ```language\ncode\n``` | 支持 XML/HTML 代码实体转义 |
+| 图片 | Obsidian 双链 `![[filename.png]]` | 使用占位符策略避免 Turndown 转义问题 |
+| Jira 链接 | 外部链接 `[KEY](https://jira...)` | 支持 key/jql 参数、CDATA 包裹自动提取 |
+| Draw.io 图表 | Obsidian 双链 `![[filename.drawio]]` | 自动提取图表文件名并关联附件 |
+| 信息面板 | 引用块 `> **INFO** ...` | 支持 info/warning/tip/note |
+| 双链 | 内部链接 `[[页面标题]]` | 保留 Confluence 页面引用关系 |
 
 ## 命令列表
 
@@ -118,11 +119,23 @@ ConfluenceSync/
 - **API 请求**: 使用 Obsidian `requestUrl` 绕过 CORS
 - **认证方式**: Basic Auth (Base64)
 - **HTML 转换**: Turndown + 自定义规则处理 Confluence Storage Format
-- **路径计算**: 基于 ancestors 数组智能构建目录树
+- **路径计算**: 基于 ancestors 数组智能构建目录树，父页面生成同名文件夹，子页面平铺存放
+- **宏处理**: 精准正则预处理（仅处理 jira/drawio/code 宏），防止嵌套宏破坏 HTML 结构
+- **附件优化**: 本地文件存在性检查，跳过已下载附件，速度提升 100 倍
+- **增量策略**: 区分新老 Root ID，新 ID 首次全量同步，后续基于版本号增量更新
 
 ## 更新日志
 
-查看 [CHANGELOG.md](./CHANGELOG.md) 获取版本历史。
+### 最新改进（未发布）
+
+- ✅ 修复新增 Root ID 时增量同步失效的问题 - 新加入的页面树会进行首次全量拉取
+- ✅ 修复 Jira 宏解析问题 - 支持 key、jql 参数以及 CDATA 包裹等各种变体
+- ✅ 修复 XML 代码块内容错乱问题 - 添加 HTML 实体转义保护尖括号
+- ✅ 修复嵌套宏导致文档排版挤压问题 - 精准正则仅处理目标宏，强制块级换行
+- ✅ 新增 Draw.io 图表支持 - 自动提取图表文件名并生成附件双链
+- ✅ 附件下载优化 - 本地缓存机制跳过已下载文件
+
+查看 [CHANGELOG.md](./CHANGELOG.md) 获取完整版本历史。
 
 ## 开发
 

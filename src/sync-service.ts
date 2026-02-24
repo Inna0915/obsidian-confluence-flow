@@ -3,7 +3,7 @@
  * 提供 pullFromConfluence 主函数，处理树形结构同步
  */
 import { App, TFile, normalizePath, Platform, Notice } from "obsidian";
-import { ConfluenceApiClient, ConfluencePage, ConfluenceAncestor } from "./confluence-api";
+import { ConfluenceApiClient, ConfluencePage, ConfluenceAncestor, Attachment } from "./confluence-api";
 import { HtmlToMarkdownConverter } from "./html-to-md";
 import { SyncStateManager, PageSyncState } from "./sync-state";
 import { ConfluenceSyncSettings } from "./settings";
@@ -128,36 +128,81 @@ export class SyncService {
 			// 4. 计算每个页面的本地路径（基于 ancestors 重构目录树）
 			const pathInfos = this.calculatePagePaths(pages);
 
-			// 5. 同步每个页面
-			for (const page of pages) {
+			// 5. 并发同步页面（带进度反馈）
+			const CONCURRENCY = 5;
+			const total = pages.length;
+			let completed = 0;
+			const progressNotice = new Notice(`同步中 (0/${total})...`, 0);
+			const pendingStates: Record<string, PageSyncState> = {};
+
+			const syncOnePage = async (page: ConfluencePage) => {
 				try {
 					const pathInfo = pathInfos.get(page.id);
 					if (!pathInfo) {
 						result.errors.push(`页面 ${page.id} 路径计算失败`);
-						continue;
+						return;
 					}
 
 					// 检查是否需要同步
 					if (!this.stateManager.needsSync(page.id, page.version.number)) {
 						result.pagesSkipped++;
-						continue;
+						return;
 					}
 
 					// 创建文件夹结构
 					await this.createFolderStructure(pathInfo.folderPath);
 
-					// 下载附件
-					const attachmentCount = await this.syncAttachments(page.id, page.title);
+					// 下载附件（利用 children.attachment.size 跳过无附件页面）
+					const attachmentSize = page.children?.attachment?.size ?? -1;
+					let attachmentCount = 0;
+					if (attachmentSize !== 0) {
+						attachmentCount = await this.syncAttachments(page.id, page.title);
+					}
 					result.attachmentsDownloaded += attachmentCount;
 
 					// ========== 字符串预处理（在调用 Turndown 之前）==========
 					const safePageTitle = this.sanitizeFileName(page.title);
 					let htmlContent = page.body.storage.value;
 
-					// 1. 图片：使用纯文本占位符（完全绕过 Turndown DOM 解析）
-					//    占位符仅含字母/数字/%/:，不会被 Turndown escape 转义
+					// 1. 使用纯文本占位符（完全绕过 Turndown DOM 解析和转义）
 					const imagePlaceholders: Map<string, string> = new Map();
 					let imgPlaceholderIdx = 0;
+					const linkPlaceholders: Map<string, string> = new Map();
+					let linkPlaceholderIdx = 0;
+
+					// 1a. 处理 Confluence 页面内部链接 <ac:link><ri:page ri:content-title="xxx" />...</ac:link>
+					htmlContent = htmlContent.replace(
+						/<ac:link[^>]*>[\s\S]*?<ri:page[^>]*ri:content-title="([^"]+)"[^>]*\/?>[\s\S]*?<\/ac:link>/gi,
+						(match, title) => {
+							const placeholder = `%%CFLLNK${linkPlaceholderIdx++}%%`;
+							linkPlaceholders.set(placeholder, `[[${title}]]`);
+							return placeholder;
+						}
+					);
+
+					// 1b. 处理附件引用链接 <ac:link><ri:attachment ri:filename="xxx" />...</ac:link>
+					htmlContent = htmlContent.replace(
+						/<ac:link[^>]*>[\s\S]*?<ri:attachment[^>]*ri:filename="([^"]+)"[^>]*\/>[\s\S]*?<\/ac:link>/gi,
+						(match, filename) => {
+							const localFileName = `${safePageTitle}_${this.sanitizeFileName(filename)}`;
+							const placeholder = `%%CFLIMG${imgPlaceholderIdx++}%%`;
+							imagePlaceholders.set(placeholder, localFileName);
+							return placeholder;
+						}
+					);
+
+					// 1b. 处理 view-file 宏
+					htmlContent = htmlContent.replace(
+						/<ac:structured-macro[^>]*ac:name="view-file"[^>]*>[\s\S]*?<ri:attachment[^>]*ri:filename="([^"]+)"[^>]*\/>[\s\S]*?<\/ac:structured-macro>/gi,
+						(match, filename) => {
+							const localFileName = `${safePageTitle}_${this.sanitizeFileName(filename)}`;
+							const placeholder = `%%CFLIMG${imgPlaceholderIdx++}%%`;
+							imagePlaceholders.set(placeholder, localFileName);
+							return placeholder;
+						}
+					);
+
+					// 1c. 处理 <ac:image> 图片标签
 					htmlContent = htmlContent.replace(
 						/<ac:image[^>]*>[\s\S]*?<ri:attachment[^>]*ri:filename="([^"]+)"[^>]*>[\s\S]*?<\/ac:image>/gi,
 						(match, filename) => {
@@ -168,7 +213,6 @@ export class SyncService {
 							return placeholder;
 						}
 					);
-					// 调试：如果正则未命中，打印原始 HTML 中 ac:image 片段
 					if (imagePlaceholders.size === 0) {
 						const acImageSnippets = htmlContent.match(/<ac:image[\s\S]*?<\/ac:image>/gi);
 						if (acImageSnippets) {
@@ -177,96 +221,81 @@ export class SyncService {
 						}
 					}
 
-					// 2. 预处理 Jira：增强版解析，支持 key、jql 以及 CDATA 和各种变体
+					// 2. 预处理特定宏：jira/drawio/code/markdown
+					const rawPlaceholders: Map<string, string> = new Map();
+					let rawPlaceholderIdx = 0;
 					htmlContent = htmlContent.replace(
-						/<ac:structured-macro[^>]*ac:name="jira"[^>]*>([\s\S]*?)<\/ac:structured-macro>/gi,
-						(match, innerContent) => {
-							let issueKey = "";
+						/<(?:ac:)?structured-macro[^>]*?(?:ac:)?name=['"]?(jira|jiraissues|drawio|gliffy|code|markdown|confluence-markdown)['"]?[^>]*>([\s\S]*?)<\/(?:ac:)?structured-macro>/gi,
+						(match, macroType, innerContent) => {
+							const macroName = macroType.toLowerCase();
 
-							// 尝试 1：直接从 key 参数提取
-							const keyMatch = innerContent.match(/<ac:parameter[^>]*ac:name="key"[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/ac:parameter>/i);
-							if (keyMatch && keyMatch[1]) {
-								issueKey = keyMatch[1].trim();
-							}
+							if (macroName === 'jira' || macroName === 'jiraissues') {
+								let issueKey = "";
+								const keyMatch = innerContent.match(/(?:ac:)?name=['"]key['"][^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\//i);
+								if (keyMatch) issueKey = keyMatch[1].trim();
 
-							// 尝试 2：如果没找到 key，可能用的是 jql 参数 (如 issueKey="PDSTDTTA-7811" 或 key=PDSTDTTA-7811)
-							if (!issueKey) {
-								const jqlMatch = innerContent.match(/<ac:parameter[^>]*ac:name="jql"[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/ac:parameter>/i);
-								if (jqlMatch && jqlMatch[1]) {
-									const jql = jqlMatch[1];
-									const extractMatch = jql.match(/(?:issuekey|key)\s*[=in]\s*["']?([A-Z0-9]+-\d+)["']?/i);
-									if (extractMatch && extractMatch[1]) {
-										issueKey = extractMatch[1].trim();
+								if (!issueKey) {
+									const jqlMatch = innerContent.match(/(?:ac:)?name=['"]jql['"][^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\//i);
+									if (jqlMatch && jqlMatch[1]) {
+										const extMatch = jqlMatch[1].match(/(?:issuekey|key)\s*[=in]\s*["']?([A-Z0-9]+-\d+)["']?/i);
+										if (extMatch) issueKey = extMatch[1].trim();
 									}
 								}
-							}
-
-							// 尝试 3：暴力兜底，直接在宏内容中用正则寻找形如 ABCD-1234 的 Jira 任务号
-							if (!issueKey) {
-								const fallbackMatch = innerContent.match(/[A-Z0-9]+-\d+/i);
-								if (fallbackMatch) {
-									issueKey = fallbackMatch[0].toUpperCase();
+								if (!issueKey) {
+									const fallback = innerContent.match(/[A-Z0-9]+-\d+/i);
+									if (fallback) issueKey = fallback[0].toUpperCase();
 								}
+
+								if (issueKey) {
+									issueKey = issueKey.replace(/[^A-Z0-9-]/gi, '');
+									return `<a href="https://jira.ykeey.cn/browse/${issueKey}">${issueKey}</a>`;
+								}
+								return `[Jira 链接解析失败]`;
 							}
 
-							// 如果成功提取到 Key，清理可能残留的特殊字符并转换为标准 <a> 标签
-							if (issueKey) {
-								issueKey = issueKey.replace(/[^A-Z0-9-]/gi, ''); // 清理多余的引号等杂质
-								return `<a href="https://jira.ykeey.cn/browse/${issueKey}">${issueKey}</a>`;
+							if (macroName === 'drawio' || macroName === 'gliffy') {
+								const diagMatch = innerContent.match(/(?:ac:)?name=['"](?:diagramName|name)['"][^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\//i);
+								if (diagMatch && diagMatch[1]) {
+									let diagramName = diagMatch[1].trim();
+									if (!diagramName.includes('.')) diagramName += '.drawio';
+									const localFileName = `${safePageTitle}_${this.sanitizeFileName(diagramName)}`;
+									const placeholder = `%%CFLIMG${imgPlaceholderIdx++}%%`;
+									imagePlaceholders.set(placeholder, localFileName);
+									return placeholder;
+								}
+								return '';
 							}
 
-							// 如果实在提取不出来，返回原内容
+							if (macroName === 'code') {
+								const langMatch = innerContent.match(/(?:ac:)?name=['"]language['"][^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\//i);
+								const lang = langMatch ? langMatch[1].trim() : '';
+
+								const bodyMatch = innerContent.match(/<(?:ac:)?plain-text-body[^>]*>([\s\S]*?)<\/(?:ac:)?plain-text-body>/i);
+								let code = bodyMatch ? bodyMatch[1] : '';
+
+								code = code.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1");
+								code = code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+								return `\n<pre><code class="language-${lang}">${code}</code></pre>\n`;
+							}
+
+							if (macroName === 'markdown' || macroName === 'confluence-markdown') {
+								const bodyMatch = innerContent.match(/<(?:ac:)?plain-text-body[^>]*>([\s\S]*?)<\/(?:ac:)?plain-text-body>/i);
+								let md = bodyMatch ? bodyMatch[1] : '';
+								md = md.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1");
+								const placeholder = `%%CFLRAW${rawPlaceholderIdx++}%%`;
+								rawPlaceholders.set(placeholder, md);
+								return placeholder;
+							}
+
 							return match;
-						}
-					);
-
-					// 3. 预处理 Draw.io 图表：提取图表文件名，复用 obsidian-img 标签生成双链
-					htmlContent = htmlContent.replace(
-						/<ac:structured-macro[^>]*ac:name="drawio"[^>]*>([\s\S]*?)<\/ac:structured-macro>/gi,
-						(match, innerContent) => {
-							// Draw.io 宏通常将文件名存放在 diagramName 参数中
-							const nameMatch = innerContent.match(/<ac:parameter[^>]*ac:name="diagramName"[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/ac:parameter>/i);
-							
-							if (nameMatch && nameMatch[1]) {
-								const diagramName = nameMatch[1].trim();
-								// 拼接出本地保存的附件文件名
-								const localFileName = `${safePageTitle}_${this.sanitizeFileName(diagramName)}`;
-								
-								// 直接伪装成图片 span，复用已有的 Turndown 规则输出 ![[文件名]]
-								return `<span class="obsidian-img" data-filename="${localFileName}"></span>`;
-							}
-							
-							// 如果没有提取到名称，返回空字符串以清除毫无意义的占位文本
-							return '';
-						}
-					);
-
-					// 4. 预处理代码块：剥离 CDATA，并进行实体转义，防止 XML 标签被 DOMParser 吞噬
-					htmlContent = htmlContent.replace(
-						/<ac:structured-macro[^>]*ac:name="code"[^>]*>([\s\S]*?)<\/ac:structured-macro>/gi,
-						(match, innerContent) => {
-							const langMatch = innerContent.match(/<ac:parameter[^>]*ac:name="language"[^>]*>([\s\S]*?)<\/ac:parameter>/i);
-							const lang = langMatch ? langMatch[1].trim() : '';
-
-							const bodyMatch = innerContent.match(/<ac:plain-text-body>([\s\S]*?)<\/ac:plain-text-body>/i);
-							let code = bodyMatch ? bodyMatch[1] : '';
-							
-							// 1. 剥离 CDATA
-							code = code.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1");
-							
-							// 2. 【关键修复】HTML 实体转义，保护 XML 尖括号不被解析为 DOM 节点
-							code = code.replace(/&/g, '&amp;')
-							           .replace(/</g, '&lt;')
-							           .replace(/>/g, '&gt;');
-							
-							return `\n<pre><code class="language-${lang}">${code}</code></pre>\n`;
 						}
 					);
 					// =========================================================
 
 					// 转换 HTML 为 Markdown
 					const confluenceUrl = `${this.settings.confluenceBaseUrl}/pages/viewpage.action?pageId=${page.id}`;
-					
+
 					let markdownContent = this.htmlConverter.generateMarkdownWithFrontmatter(
 						htmlContent,
 						{
@@ -282,30 +311,58 @@ export class SyncService {
 						markdownContent = markdownContent.replace(placeholder, `![[${localFileName}]]`);
 					}
 
+					// 后处理：将 markdown 宏占位符还原为原始内容
+					for (const [placeholder, rawMd] of rawPlaceholders) {
+						markdownContent = markdownContent.replace(placeholder, rawMd);
+					}
+
+					// 后处理：将页面链接占位符还原为双链
+					for (const [placeholder, link] of linkPlaceholders) {
+						markdownContent = markdownContent.replace(placeholder, link);
+					}
+
 					// 写入文件
 					const isNewFile = !this.app.vault.getAbstractFileByPath(pathInfo.filePath);
 					await this.writeFile(pathInfo.filePath, markdownContent);
 
-					// 更新统计
 					if (isNewFile) {
 						result.pagesCreated++;
 					} else {
 						result.pagesUpdated++;
 					}
 
-					// 更新同步状态
-					await this.stateManager.updatePageState(page.id, {
+					// 收集状态，稍后批量持久化
+					pendingStates[page.id] = {
 						pageId: page.id,
 						localPath: pathInfo.filePath,
 						version: page.version.number,
 						lastUpdated: Date.now(),
-					});
+					};
 
 				} catch (pageError) {
 					const errorMsg = `同步页面 ${page.id} (${page.title}) 失败: ${pageError.message}`;
 					console.error(`[Confluence Sync] ${errorMsg}`);
 					result.errors.push(errorMsg);
+				} finally {
+					completed++;
+					progressNotice.setMessage(`同步中 (${completed}/${total})...`);
 				}
+			};
+
+			// 并发池执行
+			const queue = [...pages];
+			const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
+				while (queue.length > 0) {
+					const page = queue.shift()!;
+					await syncOnePage(page);
+				}
+			});
+			await Promise.all(workers);
+			progressNotice.hide();
+
+			// 批量持久化所有状态
+			if (Object.keys(pendingStates).length > 0) {
+				await this.stateManager.updatePageStates(pendingStates);
 			}
 
 			// 7. 【关键】同步完成后，将新 Root ID 标记为已同步
@@ -456,25 +513,29 @@ export class SyncService {
 
 			for (const attachment of attachments) {
 				try {
-					// 下载附件内容
+					const safePageTitle = this.sanitizeFileName(pageTitle);
+					let safeFileName = this.sanitizeFileName(attachment.title);
+					// 无后缀的附件视为 drawio 图表（常规附件都有扩展名）
+					if (!safeFileName.includes('.')) {
+						safeFileName += '.drawio';
+					}
+					const fileName = `${safePageTitle}_${safeFileName}`;
+					const filePath = normalizePath(`${attachmentsFolder}/${fileName}`);
+
+					// 增量判断：文件已存在且大小一致则跳过
+					const existingFile = this.app.vault.getAbstractFileByPath(filePath);
+					if (existingFile instanceof TFile && existingFile.stat.size === attachment.size) {
+						continue;
+					}
+
 					const buffer = await this.apiClient.downloadAttachment(
 						pageId,
 						attachment.title
 					);
 
-					// 处理文件名冲突（添加页面标题前缀）
-					const safePageTitle = this.sanitizeFileName(pageTitle);
-					const safeFileName = this.sanitizeFileName(attachment.title);
-					const fileName = `${safePageTitle}_${safeFileName}`;
-					const filePath = normalizePath(`${attachmentsFolder}/${fileName}`);
-
-					// 保存附件
-					const existingFile = this.app.vault.getAbstractFileByPath(filePath);
 					if (existingFile instanceof TFile) {
-						// 更新现有文件
 						await this.app.vault.modifyBinary(existingFile, buffer);
 					} else {
-						// 创建新文件
 						await this.app.vault.createBinary(filePath, buffer);
 					}
 

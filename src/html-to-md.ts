@@ -177,11 +177,16 @@ export class HtmlToMarkdownConverter {
 					"ac:layout",
 					"ac:layout-section",
 					"ac:layout-cell",
+					"ac:structured-macro", // 【核心修复】：防止未知容器宏（如折叠块）吞噬内部换行
+					"ac-structured-macro",
+					"ac:plain-text-body",
+					"ac-plain-text-body"
 				];
 				return tagsToUnwrap.includes(nodeName);
 			},
 			replacement: (content: string) => {
-				return content || "";
+				// 【核心修复】：强制添加块级换行，绝对防止段落被挤压成单行！
+				return content ? `\n\n${content}\n\n` : "";
 			},
 		});
 
