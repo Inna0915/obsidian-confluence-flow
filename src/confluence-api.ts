@@ -351,6 +351,40 @@ export class ConfluenceApiClient {
 	}
 
 	/**
+	 * 创建新页面
+	 * @param spaceKey Space Key
+	 * @param title 页面标题
+	 * @param storageBody Storage Format 正文
+	 * @param ancestorId 父页面 ID
+	 * @returns 创建后的页面对象（含 id、version 等）
+	 */
+	async createPage(
+		spaceKey: string,
+		title: string,
+		storageBody: string,
+		ancestorId: string
+	): Promise<ConfluencePage> {
+		const baseUrl = this.getCleanBaseUrl();
+		const url = `${baseUrl}/rest/api/content`;
+
+		const body = JSON.stringify({
+			type: "page",
+			title,
+			space: { key: spaceKey },
+			ancestors: [{ id: ancestorId }],
+			body: {
+				storage: {
+					value: storageBody,
+					representation: "storage",
+				},
+			},
+		});
+
+		const response = await this.request(url, "POST", body);
+		return response.json as ConfluencePage;
+	}
+
+	/**
 	 * 获取所有需要同步的页面（处理分页）
 	 */
 	async fetchAllPagesByRootIds(

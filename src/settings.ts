@@ -19,6 +19,8 @@ export interface ConfluenceSyncSettings {
 	syncFolder: string;
 	// 根页面 ID 列表（逗号或换行分隔）
 	rootPageIds: string;
+	// Confluence Space Key（推送新页面时必填）
+	spaceKey: string;
 }
 
 /**
@@ -30,6 +32,7 @@ export const DEFAULT_SETTINGS: ConfluenceSyncSettings = {
 	password: "",
 	syncFolder: "21_工作/ConfluenceSync",
 	rootPageIds: "",
+	spaceKey: "",
 };
 
 /**
@@ -121,6 +124,20 @@ export class ConfluenceSyncSettingTab extends PluginSettingTab {
 				text.inputEl.rows = 5;
 				text.inputEl.style.width = "100%";
 			});
+
+		// Space Key 设置（推送功能）
+		new Setting(containerEl)
+			.setName("Space Key")
+			.setDesc("推送新页面到 Confluence 时使用的 Space Key（可选，如 TEAM、DEV）")
+			.addText((text) =>
+				text
+					.setPlaceholder("TEAM")
+					.setValue(this.plugin.settings.spaceKey)
+					.onChange(async (value) => {
+						this.plugin.settings.spaceKey = value.trim();
+						await this.plugin.saveSettings();
+					})
+			);
 
 		// 测试连接按钮
 		new Setting(containerEl)

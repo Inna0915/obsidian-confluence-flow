@@ -5,6 +5,7 @@
 import { App, TFile, normalizePath, Platform, Notice } from "obsidian";
 import { ConfluenceApiClient, ConfluencePage, ConfluenceAncestor, Attachment } from "./confluence-api";
 import { HtmlToMarkdownConverter } from "./html-to-md";
+import { MarkdownToStorageConverter } from "./md-to-html";
 import { SyncStateManager, PageSyncState } from "./sync-state";
 import { ConfluenceSyncSettings } from "./settings";
 
@@ -39,6 +40,7 @@ export class SyncService {
 	private apiClient: ConfluenceApiClient;
 	private stateManager: SyncStateManager;
 	private htmlConverter: HtmlToMarkdownConverter;
+	private mdConverter: MarkdownToStorageConverter;
 
 	constructor(
 		app: App,
@@ -51,6 +53,7 @@ export class SyncService {
 		this.apiClient = apiClient;
 		this.stateManager = stateManager;
 		this.htmlConverter = new HtmlToMarkdownConverter();
+		this.mdConverter = new MarkdownToStorageConverter();
 	}
 
 	/**
@@ -864,6 +867,119 @@ export class SyncService {
 		}
 
 		return result;
+	}
+
+	/**
+	 * 推送当前 Markdown 文件到 Confluence（仅创建新页面）
+	 * @param filePath 当前文件路径
+	 * @param title 页面标题
+	 * @param markdownContent 文件内容
+	 * @param frontmatter 已解析的 frontmatter
+	 * @returns 推送结果
+	 */
+	async pushToConfluence(
+		filePath: string,
+		title: string,
+		markdownContent: string,
+		frontmatter: Record<string, any> | undefined
+	): Promise<{ success: boolean; pageId?: string; pageUrl?: string; error?: string }> {
+		try {
+			// 1. 获取 Space Key
+			const spaceKey = this.settings.spaceKey;
+			if (!spaceKey) {
+				return { success: false, error: "未配置 Space Key，请在设置中填写" };
+			}
+
+			// 2. 检查是否已经有 confluence_page_id（已推送过的页面不允许再创建）
+			if (frontmatter?.confluence_page_id) {
+				return { success: false, error: `此页面已关联 Confluence（ID: ${frontmatter.confluence_page_id}），不支持重复推送` };
+			}
+
+			// 3. 解析父页面 ID
+			const parentPageId = this.resolveParentPageId(filePath, frontmatter);
+			if (!parentPageId) {
+				return { success: false, error: "无法确定父页面：文件不在同步目录下，且未通过 confluence_parent_id 指定" };
+			}
+
+			// 4. 转换 Markdown → Confluence Storage Format
+			const storageBody = this.mdConverter.convert(markdownContent);
+			console.log(`[Confluence Sync] 推送页面「${title}」到 Space=${spaceKey}, Parent=${parentPageId}`);
+
+			// 5. 调用 API 创建页面
+			const createdPage = await this.apiClient.createPage(
+				spaceKey,
+				title,
+				storageBody,
+				parentPageId
+			);
+
+			// 6. 记录同步状态
+			await this.stateManager.updatePageState(createdPage.id, {
+				pageId: createdPage.id,
+				localPath: filePath,
+				version: createdPage.version.number,
+				lastUpdated: Date.now(),
+			});
+
+			const pageUrl = `${this.settings.confluenceBaseUrl}/pages/viewpage.action?pageId=${createdPage.id}`;
+			return { success: true, pageId: createdPage.id, pageUrl };
+
+		} catch (error) {
+			console.error("[Confluence Sync] 推送失败:", error);
+			return { success: false, error: error.message };
+		}
+	}
+
+	/**
+	 * 解析父页面 ID（优先级：frontmatter → 目录反推 → 默认 Root Page）
+	 * @param filePath 当前文件路径
+	 * @param frontmatter 已解析的 frontmatter
+	 * @returns 父页面 ID 或 null
+	 */
+	private resolveParentPageId(filePath: string, frontmatter: Record<string, any> | undefined): string | null {
+		// 优先级 1：frontmatter 直接指定
+		if (frontmatter?.confluence_parent_id) {
+			return String(frontmatter.confluence_parent_id);
+		}
+
+		// 优先级 2：基于文件所在目录反推对应的 Confluence 页面
+		const syncFolder = normalizePath(this.settings.syncFolder);
+		const normalizedPath = normalizePath(filePath);
+
+		if (normalizedPath.startsWith(syncFolder)) {
+			// 获取相对于同步文件夹的路径
+			const relativePath = normalizedPath.substring(syncFolder.length + 1);
+			const parts = relativePath.split("/");
+
+			// 从直接父目录向上查找，找到第一个有同步记录的页面
+			if (parts.length > 1) {
+				// 文件在子目录中，查找同名 .md 文件对应的页面
+				const parentDirName = parts[parts.length - 2]; // 直接父目录名
+				const allStates = this.stateManager.getData().syncState;
+
+				for (const pageId in allStates) {
+					const state = allStates[pageId];
+					const statePath = normalizePath(state.localPath);
+					// 查找 localPath 以相同目录名结尾的已同步页面
+					// 例如：syncFolder/产品文档/产品文档.md → 产品文档 目录
+					const stateFileName = statePath.split("/").pop()?.replace(".md", "") || "";
+					const stateDir = statePath.split("/").slice(-2, -1)[0] || "";
+					if (stateDir === parentDirName && stateFileName === parentDirName) {
+						console.log(`[Confluence Sync] 目录反推: ${parentDirName} → pageId ${pageId}`);
+						return pageId;
+					}
+				}
+			}
+		}
+
+		// 优先级 3：使用第一个 Root Page ID 作为默认父页面
+		const rootIds = this.parseRootPageIds(this.settings.rootPageIds);
+		if (rootIds.length > 0) {
+			console.log(`[Confluence Sync] 使用默认 Root Page: ${rootIds[0]}`);
+			return rootIds[0];
+		}
+
+		return null;
 	}
 
 	/**
