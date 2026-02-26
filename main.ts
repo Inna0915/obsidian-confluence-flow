@@ -102,6 +102,7 @@ export default class ConfluenceSyncPlugin extends Plugin {
 			...DEFAULT_PLUGIN_DATA,
 			...(savedData?.syncState ? { syncState: savedData.syncState } : {}),
 			...(savedData?.lastGlobalSyncTime ? { lastGlobalSyncTime: savedData.lastGlobalSyncTime } : {}),
+			...(savedData?.syncedRootIds ? { syncedRootIds: savedData.syncedRootIds } : {}),
 		};
 
 		this.stateManager = new SyncStateManager(pluginData, async () => {
@@ -170,6 +171,38 @@ export default class ConfluenceSyncPlugin extends Plugin {
 				);
 			},
 		});
+
+		// 同步当前页面
+		this.addCommand({
+			id: "sync-current-page",
+			name: "同步当前页面",
+			checkCallback: (checking: boolean) => {
+				const activeFile = this.app.workspace.getActiveFile();
+				if (!activeFile) return false;
+				const cache = this.app.metadataCache.getFileCache(activeFile);
+				if (!cache?.frontmatter?.confluence_page_id) return false;
+				if (!checking) {
+					this.syncCurrentPage(false);
+				}
+				return true;
+			},
+		});
+
+		// 强制同步当前页面（忽略版本号）
+		this.addCommand({
+			id: "force-sync-current-page",
+			name: "强制同步当前页面（忽略版本）",
+			checkCallback: (checking: boolean) => {
+				const activeFile = this.app.workspace.getActiveFile();
+				if (!activeFile) return false;
+				const cache = this.app.metadataCache.getFileCache(activeFile);
+				if (!cache?.frontmatter?.confluence_page_id) return false;
+				if (!checking) {
+					this.syncCurrentPage(true);
+				}
+				return true;
+			},
+		});
 	}
 
 	/**
@@ -217,6 +250,44 @@ export default class ConfluenceSyncPlugin extends Plugin {
 		} catch (error) {
 			notice.hide();
 			console.error("[Confluence Sync] 同步错误:", error);
+			new Notice(`❌ 同步错误: ${error.message}`, 5000);
+		}
+	}
+
+	/**
+	 * 同步当前打开的页面
+	 */
+	async syncCurrentPage(force: boolean): Promise<void> {
+		const activeFile = this.app.workspace.getActiveFile();
+		if (!activeFile) {
+			new Notice("❌ 没有打开的文件");
+			return;
+		}
+
+		const cache = this.app.metadataCache.getFileCache(activeFile);
+		const pageId = cache?.frontmatter?.confluence_page_id;
+		if (!pageId) {
+			new Notice("❌ 当前文件不是 Confluence 同步页面（缺少 confluence_page_id）");
+			return;
+		}
+
+		if (!this.validateSettings()) return;
+
+		const notice = new Notice(`🔄 正在同步页面「${activeFile.basename}」...`, 0);
+		try {
+			const result = await this.syncService.syncSinglePage(String(pageId), activeFile.path, force);
+			notice.hide();
+			if (result.success) {
+				if (result.pagesSkipped > 0) {
+					new Notice("✅ 页面已是最新版本，无需更新");
+				} else {
+					new Notice(`✅ 页面已更新（附件: ${result.attachmentsDownloaded} 个）`, 5000);
+				}
+			} else {
+				new Notice(`❌ 同步失败: ${result.errors.join('; ')}`, 5000);
+			}
+		} catch (error) {
+			notice.hide();
 			new Notice(`❌ 同步错误: ${error.message}`, 5000);
 		}
 	}

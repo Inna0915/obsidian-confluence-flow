@@ -545,17 +545,13 @@ export class SyncService {
 					const fileName = `${safePageTitle}_${safeFileName}`;
 					const filePath = normalizePath(`${attachmentsFolder}/${fileName}`);
 
-					// 增量判断：文件已存在且大小一致则跳过
-					const existingFile = this.app.vault.getAbstractFileByPath(filePath);
-					if (existingFile instanceof TFile && existingFile.stat.size === attachment.size) {
-						continue;
-					}
-
+					// 页面版本已变更才会进入此方法，直接重新下载所有附件
 					const buffer = await this.apiClient.downloadAttachment(
 						pageId,
 						attachment.title
 					);
 
+					const existingFile = this.app.vault.getAbstractFileByPath(filePath);
 					if (existingFile instanceof TFile) {
 						await this.app.vault.modifyBinary(existingFile, buffer);
 					} else {
@@ -632,6 +628,242 @@ export class SyncService {
 			totalSyncedPages: this.stateManager.getAllSyncedPageIds().length,
 			lastSyncTime: this.stateManager.getLastGlobalSyncTime(),
 		};
+	}
+
+	/**
+	 * 将 Confluence 页面转换为 Markdown
+	 * 包含：HTML 预处理 → 占位符策略 → Turndown 转换 → 占位符还原
+	 */
+	private processPageToMarkdown(page: ConfluencePage): string {
+		const safePageTitle = this.sanitizeFileName(page.title);
+		let htmlContent = page.body.storage.value;
+
+		// 0. 复杂表格（含合并单元格）保留原始 HTML，Obsidian 可直接渲染
+		const tablePlaceholders: Map<string, string> = new Map();
+		let tablePlaceholderIdx = 0;
+		htmlContent = htmlContent.replace(
+			/<table[^>]*>[\s\S]*?<\/table>/gi,
+			(match) => {
+				if (/(?:colspan|rowspan)\s*=\s*["']\d+["']/i.test(match)) {
+					const placeholder = `%%CFLTBL${tablePlaceholderIdx++}%%`;
+					tablePlaceholders.set(placeholder, match);
+					return placeholder;
+				}
+				return match;
+			}
+		);
+
+		// 1. 使用纯文本占位符（完全绕过 Turndown DOM 解析和转义）
+		const imagePlaceholders: Map<string, string> = new Map();
+		let imgPlaceholderIdx = 0;
+		const linkPlaceholders: Map<string, string> = new Map();
+		let linkPlaceholderIdx = 0;
+
+		// 1a. 处理 Confluence 页面内部链接
+		htmlContent = htmlContent.replace(
+			/<ac:link[^>]*>[\s\S]*?<ri:page[^>]*ri:content-title="([^"]+)"[^>]*\/?>[\s\S]*?<\/ac:link>/gi,
+			(match, title) => {
+				const placeholder = `%%CFLLNK${linkPlaceholderIdx++}%%`;
+				linkPlaceholders.set(placeholder, `[[${title}]]`);
+				return placeholder;
+			}
+		);
+
+		// 1b. 处理附件引用链接
+		htmlContent = htmlContent.replace(
+			/<ac:link[^>]*>[\s\S]*?<ri:attachment[^>]*ri:filename="([^"]+)"[^>]*\/>[\s\S]*?<\/ac:link>/gi,
+			(match, filename) => {
+				const localFileName = `${safePageTitle}_${this.sanitizeFileName(filename)}`;
+				const placeholder = `%%CFLIMG${imgPlaceholderIdx++}%%`;
+				imagePlaceholders.set(placeholder, localFileName);
+				return placeholder;
+			}
+		);
+
+		// 1c. 处理 view-file 宏
+		htmlContent = htmlContent.replace(
+			/<ac:structured-macro[^>]*ac:name="view-file"[^>]*>[\s\S]*?<ri:attachment[^>]*ri:filename="([^"]+)"[^>]*\/>[\s\S]*?<\/ac:structured-macro>/gi,
+			(match, filename) => {
+				const localFileName = `${safePageTitle}_${this.sanitizeFileName(filename)}`;
+				const placeholder = `%%CFLIMG${imgPlaceholderIdx++}%%`;
+				imagePlaceholders.set(placeholder, localFileName);
+				return placeholder;
+			}
+		);
+
+		// 1d. 处理 <ac:image> 图片标签
+		htmlContent = htmlContent.replace(
+			/<ac:image[^>]*>[\s\S]*?<ri:attachment[^>]*ri:filename="([^"]+)"[^>]*>[\s\S]*?<\/ac:image>/gi,
+			(match, filename) => {
+				const localFileName = `${safePageTitle}_${this.sanitizeFileName(filename)}`;
+				const placeholder = `%%CFLIMG${imgPlaceholderIdx++}%%`;
+				imagePlaceholders.set(placeholder, localFileName);
+				return placeholder;
+			}
+		);
+
+		// 2. 预处理特定宏：jira/drawio/code/markdown
+		const rawPlaceholders: Map<string, string> = new Map();
+		let rawPlaceholderIdx = 0;
+		htmlContent = htmlContent.replace(
+			/<(?:ac:)?structured-macro[^>]*?(?:ac:)?name=['"]?(jira|jiraissues|drawio|gliffy|code|markdown|confluence-markdown)['"]?[^>]*>([\s\S]*?)<\/(?:ac:)?structured-macro>/gi,
+			(match, macroType, innerContent) => {
+				const macroName = macroType.toLowerCase();
+
+				if (macroName === 'jira' || macroName === 'jiraissues') {
+					let issueKey = "";
+					const keyMatch = innerContent.match(/(?:ac:)?name=['"]key['"][^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\//i);
+					if (keyMatch) issueKey = keyMatch[1].trim();
+
+					if (!issueKey) {
+						const jqlMatch = innerContent.match(/(?:ac:)?name=['"]jql['"][^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\//i);
+						if (jqlMatch && jqlMatch[1]) {
+							const extMatch = jqlMatch[1].match(/(?:issuekey|key)\s*[=in]\s*["']?([A-Z0-9]+-\d+)["']?/i);
+							if (extMatch) issueKey = extMatch[1].trim();
+						}
+					}
+					if (!issueKey) {
+						const fallback = innerContent.match(/[A-Z0-9]+-\d+/i);
+						if (fallback) issueKey = fallback[0].toUpperCase();
+					}
+
+					if (issueKey) {
+						issueKey = issueKey.replace(/[^A-Z0-9-]/gi, '');
+						return `<a href="https://jira.ykeey.cn/browse/${issueKey}">${issueKey}</a>`;
+					}
+					return `[Jira 链接解析失败]`;
+				}
+
+				if (macroName === 'drawio' || macroName === 'gliffy') {
+					const diagMatch = innerContent.match(/(?:ac:)?name=['"](?:diagramName|name)['"][^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\//i);
+					if (diagMatch && diagMatch[1]) {
+						let diagramName = diagMatch[1].trim();
+						if (!diagramName.includes('.')) diagramName += '.drawio';
+						const localFileName = `${safePageTitle}_${this.sanitizeFileName(diagramName)}`;
+						const pngFileName = `${safePageTitle}_${this.sanitizeFileName(diagMatch[1].trim())}.png`;
+						const p1 = `%%CFLIMG${imgPlaceholderIdx++}%%`;
+						const p2 = `%%CFLIMG${imgPlaceholderIdx++}%%`;
+						imagePlaceholders.set(p1, localFileName);
+						imagePlaceholders.set(p2, pngFileName);
+						return `${p1}\n${p2}`;
+					}
+					return '';
+				}
+
+				if (macroName === 'code') {
+					const langMatch = innerContent.match(/(?:ac:)?name=['"]language['"][^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\//i);
+					const lang = langMatch ? langMatch[1].trim() : '';
+
+					const bodyMatch = innerContent.match(/<(?:ac:)?plain-text-body[^>]*>([\s\S]*?)<\/(?:ac:)?plain-text-body>/i);
+					let code = bodyMatch ? bodyMatch[1] : '';
+
+					code = code.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1");
+					code = code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+					return `\n<pre><code class="language-${lang}">${code}</code></pre>\n`;
+				}
+
+				if (macroName === 'markdown' || macroName === 'confluence-markdown') {
+					const bodyMatch = innerContent.match(/<(?:ac:)?plain-text-body[^>]*>([\s\S]*?)<\/(?:ac:)?plain-text-body>/i);
+					let md = bodyMatch ? bodyMatch[1] : '';
+					md = md.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1");
+					const placeholder = `%%CFLRAW${rawPlaceholderIdx++}%%`;
+					rawPlaceholders.set(placeholder, md);
+					return placeholder;
+				}
+
+				return match;
+			}
+		);
+
+		// 3. Turndown 转换
+		const confluenceUrl = `${this.settings.confluenceBaseUrl}/pages/viewpage.action?pageId=${page.id}`;
+
+		let markdownContent = this.htmlConverter.generateMarkdownWithFrontmatter(
+			htmlContent,
+			{
+				title: page.title,
+				pageId: page.id,
+				version: page.version.number,
+				confluenceUrl,
+			}
+		);
+
+		// 4. 后处理：还原占位符
+		for (const [placeholder, localFileName] of imagePlaceholders) {
+			markdownContent = markdownContent.replace(placeholder, `![[${localFileName}]]`);
+		}
+		for (const [placeholder, rawMd] of rawPlaceholders) {
+			markdownContent = markdownContent.replace(placeholder, rawMd);
+		}
+		for (const [placeholder, link] of linkPlaceholders) {
+			markdownContent = markdownContent.replace(placeholder, link);
+		}
+		for (const [placeholder, tableHtml] of tablePlaceholders) {
+			markdownContent = markdownContent.replace(placeholder, `\n<div style="overflow-x:auto">\n${tableHtml}\n</div>\n`);
+		}
+
+		return markdownContent;
+	}
+
+	/**
+	 * 同步单个页面（用于当前页面更新）
+	 * @param pageId Confluence 页面 ID
+	 * @param existingFilePath 现有文件路径
+	 * @param force 是否强制更新（忽略版本检查）
+	 */
+	async syncSinglePage(pageId: string, existingFilePath: string, force: boolean = false): Promise<SyncResult> {
+		const result: SyncResult = {
+			success: false,
+			pagesCreated: 0,
+			pagesUpdated: 0,
+			pagesSkipped: 0,
+			attachmentsDownloaded: 0,
+			errors: [],
+		};
+
+		try {
+			// 1. 获取页面最新内容
+			const page = await this.apiClient.getPage(pageId);
+
+			// 2. 版本检查（非强制模式）
+			if (!force && !this.stateManager.needsSync(pageId, page.version.number)) {
+				result.pagesSkipped = 1;
+				result.success = true;
+				return result;
+			}
+
+			// 3. 确保附件文件夹存在
+			await this.ensureSyncFolders();
+
+			// 4. 同步附件
+			const attachmentSize = page.children?.attachment?.size ?? -1;
+			if (attachmentSize !== 0) {
+				result.attachmentsDownloaded = await this.syncAttachments(page.id, page.title);
+			}
+
+			// 5. 转换页面内容为 Markdown
+			const markdownContent = this.processPageToMarkdown(page);
+
+			// 6. 写入文件
+			await this.writeFile(existingFilePath, markdownContent);
+			result.pagesUpdated = 1;
+
+			// 7. 更新同步状态
+			await this.stateManager.updatePageState(pageId, {
+				pageId: page.id,
+				localPath: existingFilePath,
+				version: page.version.number,
+				lastUpdated: Date.now(),
+			});
+
+			result.success = true;
+		} catch (error) {
+			result.errors.push(`同步页面 ${pageId} 失败: ${error.message}`);
+			console.error(`[Confluence Sync] 单页同步失败:`, error);
+		}
+
+		return result;
 	}
 
 	/**
