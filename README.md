@@ -7,9 +7,9 @@
 - 🌲 **树形结构同步** - 基于 Confluence 的 ancestors 关系重构层级目录，智能判断父/子页面文件夹结构
 - ⚡ **增量同步** - 基于 `lastModified` 时间戳，只同步变更内容；新 Root ID 首次自动全量同步
 - 📎 **附件下载** - 自动下载页面附件，本地缓存跳过已下载文件，避免重复下载大文件
-- 📋 **复杂表格** - 保留含合并单元格(colspan/rowspan)的原始 HTML 表格
+- 📋 **表格转 Markdown** - 所有表格转为 GFM Markdown，合并单元格(colspan/rowspan)拍平为"首格放内容、其余留空"，单元格内 Jira/图片/内链正常渲染
 - 🔄 **增量更新** - 记录同步状态，避免重复下载未变更页面
-- 🏷️ **元数据保留** - 在 YAML Frontmatter 中保存 Confluence 页面 ID、版本号、同步时间等信息
+- 🏷️ **元数据保留** - 在 YAML Frontmatter 中保存 Confluence 页面 ID、版本号、原文更新时间(`confluence_updated`)、同步时间等信息
 - 🎨 **富媒体转换** - 支持代码块、图片、Jira 链接、Draw.io 图表、信息面板等 Confluence 宏转换为 Markdown
 
 ## 安装
@@ -79,9 +79,11 @@ ConfluenceSync/
 |--------------|---------------|------|
 | 代码块 | 围栏式代码块 ```language\ncode\n``` | 支持 XML/HTML 代码实体转义 |
 | 图片 | Obsidian 双链 `![[filename.png]]` | 使用占位符策略避免 Turndown 转义问题 |
-| 复杂表格 | 原始 HTML `<table>` | 保留 colspan/rowspan 合并单元格 |
+| 表格 | GFM Markdown 表格 | 合并单元格(colspan/rowspan)拍平：首格放内容、其余留空 |
 | Jira 链接 | 外部链接 `[KEY](https://jira...)` | 支持 key/jql 参数、CDATA 包裹自动提取 |
 | Draw.io 图表 | Obsidian 双链 `![[filename.drawio]]` | 自动提取图表文件名并关联附件 |
+| PDF (viewpdf) | Obsidian 双链 `![[filename.pdf]]` | 嵌入 PDF 附件 |
+| 任务清单 | `- [x]` / `- [ ]` | ac:task-list 转 Markdown 勾选框 |
 | 信息面板 | 引用块 `> **INFO** ...` | 支持 info/warning/tip/note |
 | 双链 | 内部链接 `[[页面标题]]` | 保留 Confluence 页面引用关系 |
 
@@ -92,6 +94,10 @@ ConfluenceSync/
 - `Confluence Sync: 从 Confluence 同步` - 执行增量同步
 - `Confluence Sync: 强制全量同步` - 清除缓存后全量同步
 - `Confluence Sync: 显示同步统计` - 查看同步状态
+- `Confluence Sync: 同步当前页面` - 仅重拉当前打开的页面（基于 frontmatter 的 `confluence_page_id`）
+- `Confluence Sync: 强制同步当前页面（忽略版本）` - 忽略版本号强制重拉当前页面
+
+> 本插件为**纯单向同步**（Confluence → Obsidian），不提供向 Confluence 写入/推送的能力。
 
 ## 配置说明
 
@@ -128,18 +134,15 @@ ConfluenceSync/
 
 ## 更新日志
 
-### 最新改进（v1.2.1）
+### 最新改进（v1.4.0）
 
-- ✅ **新增** Draw.io 双格式支持 - 同时生成 `.drawio` 和 `.png` 占位符
-- ✅ **修复** 添加 Confluence 地址空值检查，未配置时给出明确错误提示
-- ✅ 文件夹路径自动补全 - 设置面板输入路径时提供智能建议
-- ✅ 复杂表格支持 - 保留含合并单元格的原始 HTML 表格
-- ✅ 修复新增 Root ID 时增量同步失效的问题
-- ✅ 修复 Jira 宏解析问题 - 支持 key、jql 参数以及 CDATA 包裹等各种变体
-- ✅ 修复 XML 代码块内容错乱问题
-- ✅ 修复嵌套宏导致文档排版挤压问题
-- ✅ 新增 Draw.io 图表支持
-- ✅ 附件下载优化 - 本地缓存机制跳过已下载文件
+- ✅ **重写表格转换** - 所有表格统一转为 GFM Markdown，合并单元格拍平（首格放内容、其余留空）
+- ✅ **修复** 表格内 Jira 链接 / 图片 / 内链丢失 - 调整转换顺序，单元格内元素正确行内化
+- ✅ **修复** 无合并的简单表格被打散成竖排文本
+- ✅ **修复** aura-panel 等未知宏的 `<ac:parameter>` 样式 JSON 泄漏成正文
+- ✅ **新增** `ac:task-list` 任务清单 → `- [x]` / `- [ ]` 勾选框
+- ✅ **新增** `viewpdf` 宏 → PDF 附件嵌入
+- ✅ **移除** 向 Confluence 写入（push）的全部能力，回归纯单向同步
 
 查看 [CHANGELOG.md](./CHANGELOG.md) 获取完整版本历史。
 

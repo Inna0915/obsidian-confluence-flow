@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-06-02
+
+### Changed
+- **重写表格转换**：所有 Confluence 表格（含/不含合并单元格）统一转为 GFM Markdown，合并单元格(colspan/rowspan)拍平为"首格放内容、其余留空"。不再把复杂表格保留为原始 HTML。
+
+### Fixed
+- 修复表格内 Jira 链接 / 图片 / 内链丢失的问题 —— 调整转换顺序，宏/图片/链接预处理在表格转换之前完成，单元格内元素得以正确行内化
+- 修复无合并单元格的简单表格被 Turndown 打散成竖排文本的问题
+- 修复 `aura-panel` 等未知宏的 `<ac:parameter>` 样式 JSON 泄漏成正文的问题
+
+### Added
+- 支持 `ac:task-list` 任务清单 → `- [x]` / `- [ ]` 勾选框
+- 支持 `viewpdf` 宏 → PDF 附件嵌入
+- frontmatter 新增 `confluence_updated` 字段（Confluence 原文最后修改时间 `version.when`），便于按真实更新时间排序 `![[...]]`
+
+### Removed
+- **移除向 Confluence 写入（push）的全部能力**：删除"推送当前页面到 Confluence"命令、`MarkdownToStorageConverter`、`createPage` API、Space Key 设置。本插件回归纯单向（Confluence → Obsidian）同步。
+
+## [1.3.0] - 2026-05-31
+
+### Added
+- 单页同步 / 强制同步当前页面命令（基于 frontmatter 的 `confluence_page_id`）
+
+### Fixed
+- 修复增量同步相关问题，性能优化
+
 ## [1.2.1] - 2026-02-24
 
 ### Added

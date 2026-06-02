@@ -84,6 +84,11 @@ Confluence Sync 是一个 Obsidian 插件，用于从私有部署的 Confluence 
   - `ac:structured-macro` (info/warning/tip/note) → 引用块
   - `ac:structured-macro` (drawio) → 占位提示
   - `ri:user` → `@username` 提及
+- `extractTablesToMarkdown` / `convertTableToMarkdown` - 将所有 `<table>` 转为 GFM Markdown，
+  合并单元格(colspan/rowspan)按 grid 拍平（首格放内容、其余留空），单元格内容复用 Turndown 行内转换
+
+> 注意：本插件为纯单向同步（Confluence → Obsidian），不含向 Confluence 写入的能力。
+> 转换顺序很关键：宏/图片/内链预处理必须在表格转换「之前」完成（见 `sync-service.processPageToMarkdown`）。
 
 ## 构建命令
 

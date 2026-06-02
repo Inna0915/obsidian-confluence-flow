@@ -5,7 +5,6 @@
 import { App, TFile, normalizePath, Platform, Notice } from "obsidian";
 import { ConfluenceApiClient, ConfluencePage, ConfluenceAncestor, Attachment } from "./confluence-api";
 import { HtmlToMarkdownConverter } from "./html-to-md";
-import { MarkdownToStorageConverter } from "./md-to-html";
 import { SyncStateManager, PageSyncState } from "./sync-state";
 import { ConfluenceSyncSettings } from "./settings";
 
@@ -40,7 +39,6 @@ export class SyncService {
 	private apiClient: ConfluenceApiClient;
 	private stateManager: SyncStateManager;
 	private htmlConverter: HtmlToMarkdownConverter;
-	private mdConverter: MarkdownToStorageConverter;
 
 	constructor(
 		app: App,
@@ -53,7 +51,6 @@ export class SyncService {
 		this.apiClient = apiClient;
 		this.stateManager = stateManager;
 		this.htmlConverter = new HtmlToMarkdownConverter();
-		this.mdConverter = new MarkdownToStorageConverter();
 	}
 
 	/**
@@ -163,189 +160,8 @@ export class SyncService {
 					}
 					result.attachmentsDownloaded += attachmentCount;
 
-					// ========== 字符串预处理（在调用 Turndown 之前）==========
-					const safePageTitle = this.sanitizeFileName(page.title);
-					let htmlContent = page.body.storage.value;
-
-					// 0. 复杂表格（含合并单元格）保留原始 HTML，Obsidian 可直接渲染
-					const tablePlaceholders: Map<string, string> = new Map();
-					let tablePlaceholderIdx = 0;
-					htmlContent = htmlContent.replace(
-						/<table[^>]*>[\s\S]*?<\/table>/gi,
-						(match) => {
-							if (/(?:colspan|rowspan)\s*=\s*["']\d+["']/i.test(match)) {
-								const placeholder = `%%CFLTBL${tablePlaceholderIdx++}%%`;
-								tablePlaceholders.set(placeholder, match);
-								return placeholder;
-							}
-							return match;
-						}
-					);
-
-					// 1. 使用纯文本占位符（完全绕过 Turndown DOM 解析和转义）
-					const imagePlaceholders: Map<string, string> = new Map();
-					let imgPlaceholderIdx = 0;
-					const linkPlaceholders: Map<string, string> = new Map();
-					let linkPlaceholderIdx = 0;
-
-					// 1a. 处理 Confluence 页面内部链接 <ac:link><ri:page ri:content-title="xxx" />...</ac:link>
-					htmlContent = htmlContent.replace(
-						/<ac:link[^>]*>[\s\S]*?<ri:page[^>]*ri:content-title="([^"]+)"[^>]*\/?>[\s\S]*?<\/ac:link>/gi,
-						(match, title) => {
-							const placeholder = `%%CFLLNK${linkPlaceholderIdx++}%%`;
-							linkPlaceholders.set(placeholder, `[[${title}]]`);
-							return placeholder;
-						}
-					);
-
-					// 1b. 处理附件引用链接 <ac:link><ri:attachment ri:filename="xxx" />...</ac:link>
-					htmlContent = htmlContent.replace(
-						/<ac:link[^>]*>[\s\S]*?<ri:attachment[^>]*ri:filename="([^"]+)"[^>]*\/>[\s\S]*?<\/ac:link>/gi,
-						(match, filename) => {
-							const localFileName = `${safePageTitle}_${this.sanitizeFileName(filename)}`;
-							const placeholder = `%%CFLIMG${imgPlaceholderIdx++}%%`;
-							imagePlaceholders.set(placeholder, localFileName);
-							return placeholder;
-						}
-					);
-
-					// 1b. 处理 view-file 宏
-					htmlContent = htmlContent.replace(
-						/<ac:structured-macro[^>]*ac:name="view-file"[^>]*>[\s\S]*?<ri:attachment[^>]*ri:filename="([^"]+)"[^>]*\/>[\s\S]*?<\/ac:structured-macro>/gi,
-						(match, filename) => {
-							const localFileName = `${safePageTitle}_${this.sanitizeFileName(filename)}`;
-							const placeholder = `%%CFLIMG${imgPlaceholderIdx++}%%`;
-							imagePlaceholders.set(placeholder, localFileName);
-							return placeholder;
-						}
-					);
-
-					// 1c. 处理 <ac:image> 图片标签
-					htmlContent = htmlContent.replace(
-						/<ac:image[^>]*>[\s\S]*?<ri:attachment[^>]*ri:filename="([^"]+)"[^>]*>[\s\S]*?<\/ac:image>/gi,
-						(match, filename) => {
-							const localFileName = `${safePageTitle}_${this.sanitizeFileName(filename)}`;
-							const placeholder = `%%CFLIMG${imgPlaceholderIdx++}%%`;
-							imagePlaceholders.set(placeholder, localFileName);
-							console.log(`[Confluence Sync] 图片匹配成功: ${filename} → ${placeholder} → ![[${localFileName}]]`);
-							return placeholder;
-						}
-					);
-					if (imagePlaceholders.size === 0) {
-						const acImageSnippets = htmlContent.match(/<ac:image[\s\S]*?<\/ac:image>/gi);
-						if (acImageSnippets) {
-							console.warn(`[Confluence Sync] 页面 "${page.title}" 含 ${acImageSnippets.length} 个 <ac:image> 但正则未命中，原始片段:`);
-							acImageSnippets.forEach((s, i) => console.warn(`  [${i}]`, s.substring(0, 300)));
-						}
-					}
-
-					// 2. 预处理特定宏：jira/drawio/code/markdown
-					const rawPlaceholders: Map<string, string> = new Map();
-					let rawPlaceholderIdx = 0;
-					htmlContent = htmlContent.replace(
-						/<(?:ac:)?structured-macro[^>]*?(?:ac:)?name=['"]?(jira|jiraissues|drawio|gliffy|code|markdown|confluence-markdown)['"]?[^>]*>([\s\S]*?)<\/(?:ac:)?structured-macro>/gi,
-						(match, macroType, innerContent) => {
-							const macroName = macroType.toLowerCase();
-
-							if (macroName === 'jira' || macroName === 'jiraissues') {
-								let issueKey = "";
-								const keyMatch = innerContent.match(/(?:ac:)?name=['"]key['"][^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\//i);
-								if (keyMatch) issueKey = keyMatch[1].trim();
-
-								if (!issueKey) {
-									const jqlMatch = innerContent.match(/(?:ac:)?name=['"]jql['"][^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\//i);
-									if (jqlMatch && jqlMatch[1]) {
-										const extMatch = jqlMatch[1].match(/(?:issuekey|key)\s*[=in]\s*["']?([A-Z0-9]+-\d+)["']?/i);
-										if (extMatch) issueKey = extMatch[1].trim();
-									}
-								}
-								if (!issueKey) {
-									const fallback = innerContent.match(/[A-Z0-9]+-\d+/i);
-									if (fallback) issueKey = fallback[0].toUpperCase();
-								}
-
-								if (issueKey) {
-									issueKey = issueKey.replace(/[^A-Z0-9-]/gi, '');
-									return `<a href="https://jira.ykeey.cn/browse/${issueKey}">${issueKey}</a>`;
-								}
-								return `[Jira 链接解析失败]`;
-							}
-
-							if (macroName === 'drawio' || macroName === 'gliffy') {
-								const diagMatch = innerContent.match(/(?:ac:)?name=['"](?:diagramName|name)['"][^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\//i);
-								if (diagMatch && diagMatch[1]) {
-									let diagramName = diagMatch[1].trim();
-									if (!diagramName.includes('.')) diagramName += '.drawio';
-									const localFileName = `${safePageTitle}_${this.sanitizeFileName(diagramName)}`;
-									const pngFileName = `${safePageTitle}_${this.sanitizeFileName(diagMatch[1].trim())}.png`;
-									const p1 = `%%CFLIMG${imgPlaceholderIdx++}%%`;
-									const p2 = `%%CFLIMG${imgPlaceholderIdx++}%%`;
-									imagePlaceholders.set(p1, localFileName);
-									imagePlaceholders.set(p2, pngFileName);
-									return `${p1}\n${p2}`;
-								}
-								return '';
-							}
-
-							if (macroName === 'code') {
-								const langMatch = innerContent.match(/(?:ac:)?name=['"]language['"][^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\//i);
-								const lang = langMatch ? langMatch[1].trim() : '';
-
-								const bodyMatch = innerContent.match(/<(?:ac:)?plain-text-body[^>]*>([\s\S]*?)<\/(?:ac:)?plain-text-body>/i);
-								let code = bodyMatch ? bodyMatch[1] : '';
-
-								code = code.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1");
-								code = code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-								return `\n<pre><code class="language-${lang}">${code}</code></pre>\n`;
-							}
-
-							if (macroName === 'markdown' || macroName === 'confluence-markdown') {
-								const bodyMatch = innerContent.match(/<(?:ac:)?plain-text-body[^>]*>([\s\S]*?)<\/(?:ac:)?plain-text-body>/i);
-								let md = bodyMatch ? bodyMatch[1] : '';
-								md = md.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1");
-								const placeholder = `%%CFLRAW${rawPlaceholderIdx++}%%`;
-								rawPlaceholders.set(placeholder, md);
-								return placeholder;
-							}
-
-							return match;
-						}
-					);
-					// =========================================================
-
-					// 转换 HTML 为 Markdown
-					const confluenceUrl = `${this.settings.confluenceBaseUrl}/pages/viewpage.action?pageId=${page.id}`;
-
-					let markdownContent = this.htmlConverter.generateMarkdownWithFrontmatter(
-						htmlContent,
-						{
-							title: page.title,
-							pageId: page.id,
-							version: page.version.number,
-							confluenceUrl,
-						}
-					);
-
-					// 后处理：将占位符替换为 Obsidian 图片双链
-					for (const [placeholder, localFileName] of imagePlaceholders) {
-						markdownContent = markdownContent.replace(placeholder, `![[${localFileName}]]`);
-					}
-
-					// 后处理：将 markdown 宏占位符还原为原始内容
-					for (const [placeholder, rawMd] of rawPlaceholders) {
-						markdownContent = markdownContent.replace(placeholder, rawMd);
-					}
-
-					// 后处理：将页面链接占位符还原为双链
-					for (const [placeholder, link] of linkPlaceholders) {
-						markdownContent = markdownContent.replace(placeholder, link);
-					}
-
-					// 后处理：将复杂表格占位符还原为原始 HTML（包裹可滚动容器）
-					for (const [placeholder, tableHtml] of tablePlaceholders) {
-						markdownContent = markdownContent.replace(placeholder, `\n<div style="overflow-x:auto">\n${tableHtml}\n</div>\n`);
-					}
+					// 转换 HTML 为 Markdown（统一走 processPageToMarkdown，避免逻辑重复）
+					const markdownContent = this.processPageToMarkdown(page);
 
 					// 写入文件
 					const isNewFile = !this.app.vault.getAbstractFileByPath(pathInfo.filePath);
@@ -635,34 +451,23 @@ export class SyncService {
 
 	/**
 	 * 将 Confluence 页面转换为 Markdown
-	 * 包含：HTML 预处理 → 占位符策略 → Turndown 转换 → 占位符还原
+	 * 顺序：宏/图片/链接预处理 → 清理未知宏参数 → 表格转 GFM → Turndown → 还原占位符
+	 * 注意：表格转换必须在宏/图片/链接预处理「之后」，这样单元格内的 jira/图片/内链
+	 *       已变成占位符或行内 HTML，会被正确转换（修复旧版表格内元素丢失的 bug）。
 	 */
 	private processPageToMarkdown(page: ConfluencePage): string {
 		const safePageTitle = this.sanitizeFileName(page.title);
 		let htmlContent = page.body.storage.value;
 
-		// 0. 复杂表格（含合并单元格）保留原始 HTML，Obsidian 可直接渲染
-		const tablePlaceholders: Map<string, string> = new Map();
-		let tablePlaceholderIdx = 0;
-		htmlContent = htmlContent.replace(
-			/<table[^>]*>[\s\S]*?<\/table>/gi,
-			(match) => {
-				if (/(?:colspan|rowspan)\s*=\s*["']\d+["']/i.test(match)) {
-					const placeholder = `%%CFLTBL${tablePlaceholderIdx++}%%`;
-					tablePlaceholders.set(placeholder, match);
-					return placeholder;
-				}
-				return match;
-			}
-		);
-
-		// 1. 使用纯文本占位符（完全绕过 Turndown DOM 解析和转义）
+		// 占位符集合
 		const imagePlaceholders: Map<string, string> = new Map();
 		let imgPlaceholderIdx = 0;
 		const linkPlaceholders: Map<string, string> = new Map();
 		let linkPlaceholderIdx = 0;
+		const rawPlaceholders: Map<string, string> = new Map();
+		let rawPlaceholderIdx = 0;
 
-		// 1a. 处理 Confluence 页面内部链接
+		// 1a. Confluence 页面内部链接 → [[标题]]
 		htmlContent = htmlContent.replace(
 			/<ac:link[^>]*>[\s\S]*?<ri:page[^>]*ri:content-title="([^"]+)"[^>]*\/?>[\s\S]*?<\/ac:link>/gi,
 			(match, title) => {
@@ -672,7 +477,7 @@ export class SyncService {
 			}
 		);
 
-		// 1b. 处理附件引用链接
+		// 1b. 附件引用链接 → ![[本地文件]]
 		htmlContent = htmlContent.replace(
 			/<ac:link[^>]*>[\s\S]*?<ri:attachment[^>]*ri:filename="([^"]+)"[^>]*\/>[\s\S]*?<\/ac:link>/gi,
 			(match, filename) => {
@@ -683,7 +488,7 @@ export class SyncService {
 			}
 		);
 
-		// 1c. 处理 view-file 宏
+		// 1c. view-file 宏
 		htmlContent = htmlContent.replace(
 			/<ac:structured-macro[^>]*ac:name="view-file"[^>]*>[\s\S]*?<ri:attachment[^>]*ri:filename="([^"]+)"[^>]*\/>[\s\S]*?<\/ac:structured-macro>/gi,
 			(match, filename) => {
@@ -694,7 +499,7 @@ export class SyncService {
 			}
 		);
 
-		// 1d. 处理 <ac:image> 图片标签
+		// 1d. <ac:image> 图片
 		htmlContent = htmlContent.replace(
 			/<ac:image[^>]*>[\s\S]*?<ri:attachment[^>]*ri:filename="([^"]+)"[^>]*>[\s\S]*?<\/ac:image>/gi,
 			(match, filename) => {
@@ -705,11 +510,29 @@ export class SyncService {
 			}
 		);
 
-		// 2. 预处理特定宏：jira/drawio/code/markdown
-		const rawPlaceholders: Map<string, string> = new Map();
-		let rawPlaceholderIdx = 0;
+		// 1e. 任务清单 ac:task-list → - [x] / - [ ]（用 raw 占位符避免 Turndown 转义）
 		htmlContent = htmlContent.replace(
-			/<(?:ac:)?structured-macro[^>]*?(?:ac:)?name=['"]?(jira|jiraissues|drawio|gliffy|code|markdown|confluence-markdown)['"]?[^>]*>([\s\S]*?)<\/(?:ac:)?structured-macro>/gi,
+			/<ac:task-list>([\s\S]*?)<\/ac:task-list>/gi,
+			(match, inner) => {
+				const items: string[] = [];
+				inner.replace(/<ac:task>([\s\S]*?)<\/ac:task>/gi, (m: string, t: string) => {
+					const done = /<ac:task-status>\s*complete\s*<\/ac:task-status>/i.test(t);
+					const bodyMatch = t.match(/<ac:task-body>([\s\S]*?)<\/ac:task-body>/i);
+					let body = bodyMatch ? bodyMatch[1] : '';
+					body = body.replace(/<[^>]+>/g, '').replace(/&nbsp;/gi, ' ').trim();
+					items.push(`- [${done ? 'x' : ' '}] ${body}`);
+					return m;
+				});
+				if (items.length === 0) return '';
+				const placeholder = `%%CFLRAW${rawPlaceholderIdx++}%%`;
+				rawPlaceholders.set(placeholder, '\n' + items.join('\n') + '\n');
+				return placeholder;
+			}
+		);
+
+		// 2. 预处理特定宏：jira/drawio/code/markdown/viewpdf
+		htmlContent = htmlContent.replace(
+			/<(?:ac:)?structured-macro[^>]*?(?:ac:)?name=['"]?(jira|jiraissues|drawio|gliffy|code|markdown|confluence-markdown|viewpdf)['"]?[^>]*>([\s\S]*?)<\/(?:ac:)?structured-macro>/gi,
 			(match, macroType, innerContent) => {
 				const macroName = macroType.toLowerCase();
 
@@ -753,6 +576,17 @@ export class SyncService {
 					return '';
 				}
 
+				if (macroName === 'viewpdf') {
+					const fnMatch = innerContent.match(/<ri:attachment[^>]*ri:filename="([^"]+)"/i);
+					if (fnMatch) {
+						const localFileName = `${safePageTitle}_${this.sanitizeFileName(fnMatch[1])}`;
+						const placeholder = `%%CFLIMG${imgPlaceholderIdx++}%%`;
+						imagePlaceholders.set(placeholder, localFileName);
+						return placeholder;
+					}
+					return '';
+				}
+
 				if (macroName === 'code') {
 					const langMatch = innerContent.match(/(?:ac:)?name=['"]language['"][^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\//i);
 					const lang = langMatch ? langMatch[1].trim() : '';
@@ -779,6 +613,16 @@ export class SyncService {
 			}
 		);
 
+		// 2b. 清理未知宏遗留的参数（aura-panel 等的样式 JSON），防止泄漏成正文
+		htmlContent = htmlContent
+			.replace(/<ac:parameter\b[^>]*\/>/gi, '')
+			.replace(/<ac:parameter\b[\s\S]*?<\/ac:parameter>/gi, '');
+
+		// 2c. 表格 → GFM Markdown（此时单元格内已是占位符/行内 HTML）
+		const tableResult = this.htmlConverter.extractTablesToMarkdown(htmlContent);
+		htmlContent = tableResult.html;
+		const tablePlaceholders = tableResult.tables;
+
 		// 3. Turndown 转换
 		const confluenceUrl = `${this.settings.confluenceBaseUrl}/pages/viewpage.action?pageId=${page.id}`;
 
@@ -789,21 +633,22 @@ export class SyncService {
 				pageId: page.id,
 				version: page.version.number,
 				confluenceUrl,
+				updatedAt: page.version.when,
 			}
 		);
 
-		// 4. 后处理：还原占位符
+		// 4. 后处理：还原占位符。表格必须最先还原（其内部仍含图片/内链占位符）
+		for (const [placeholder, tableMd] of tablePlaceholders) {
+			markdownContent = markdownContent.replace(placeholder, () => tableMd);
+		}
 		for (const [placeholder, localFileName] of imagePlaceholders) {
-			markdownContent = markdownContent.replace(placeholder, `![[${localFileName}]]`);
+			markdownContent = markdownContent.replace(placeholder, () => `![[${localFileName}]]`);
 		}
 		for (const [placeholder, rawMd] of rawPlaceholders) {
-			markdownContent = markdownContent.replace(placeholder, rawMd);
+			markdownContent = markdownContent.replace(placeholder, () => rawMd);
 		}
 		for (const [placeholder, link] of linkPlaceholders) {
-			markdownContent = markdownContent.replace(placeholder, link);
-		}
-		for (const [placeholder, tableHtml] of tablePlaceholders) {
-			markdownContent = markdownContent.replace(placeholder, `\n<div style="overflow-x:auto">\n${tableHtml}\n</div>\n`);
+			markdownContent = markdownContent.replace(placeholder, () => link);
 		}
 
 		return markdownContent;
@@ -867,119 +712,6 @@ export class SyncService {
 		}
 
 		return result;
-	}
-
-	/**
-	 * 推送当前 Markdown 文件到 Confluence（仅创建新页面）
-	 * @param filePath 当前文件路径
-	 * @param title 页面标题
-	 * @param markdownContent 文件内容
-	 * @param frontmatter 已解析的 frontmatter
-	 * @returns 推送结果
-	 */
-	async pushToConfluence(
-		filePath: string,
-		title: string,
-		markdownContent: string,
-		frontmatter: Record<string, any> | undefined
-	): Promise<{ success: boolean; pageId?: string; pageUrl?: string; error?: string }> {
-		try {
-			// 1. 获取 Space Key
-			const spaceKey = this.settings.spaceKey;
-			if (!spaceKey) {
-				return { success: false, error: "未配置 Space Key，请在设置中填写" };
-			}
-
-			// 2. 检查是否已经有 confluence_page_id（已推送过的页面不允许再创建）
-			if (frontmatter?.confluence_page_id) {
-				return { success: false, error: `此页面已关联 Confluence（ID: ${frontmatter.confluence_page_id}），不支持重复推送` };
-			}
-
-			// 3. 解析父页面 ID
-			const parentPageId = this.resolveParentPageId(filePath, frontmatter);
-			if (!parentPageId) {
-				return { success: false, error: "无法确定父页面：文件不在同步目录下，且未通过 confluence_parent_id 指定" };
-			}
-
-			// 4. 转换 Markdown → Confluence Storage Format
-			const storageBody = this.mdConverter.convert(markdownContent);
-			console.log(`[Confluence Sync] 推送页面「${title}」到 Space=${spaceKey}, Parent=${parentPageId}`);
-
-			// 5. 调用 API 创建页面
-			const createdPage = await this.apiClient.createPage(
-				spaceKey,
-				title,
-				storageBody,
-				parentPageId
-			);
-
-			// 6. 记录同步状态
-			await this.stateManager.updatePageState(createdPage.id, {
-				pageId: createdPage.id,
-				localPath: filePath,
-				version: createdPage.version.number,
-				lastUpdated: Date.now(),
-			});
-
-			const pageUrl = `${this.settings.confluenceBaseUrl}/pages/viewpage.action?pageId=${createdPage.id}`;
-			return { success: true, pageId: createdPage.id, pageUrl };
-
-		} catch (error) {
-			console.error("[Confluence Sync] 推送失败:", error);
-			return { success: false, error: error.message };
-		}
-	}
-
-	/**
-	 * 解析父页面 ID（优先级：frontmatter → 目录反推 → 默认 Root Page）
-	 * @param filePath 当前文件路径
-	 * @param frontmatter 已解析的 frontmatter
-	 * @returns 父页面 ID 或 null
-	 */
-	private resolveParentPageId(filePath: string, frontmatter: Record<string, any> | undefined): string | null {
-		// 优先级 1：frontmatter 直接指定
-		if (frontmatter?.confluence_parent_id) {
-			return String(frontmatter.confluence_parent_id);
-		}
-
-		// 优先级 2：基于文件所在目录反推对应的 Confluence 页面
-		const syncFolder = normalizePath(this.settings.syncFolder);
-		const normalizedPath = normalizePath(filePath);
-
-		if (normalizedPath.startsWith(syncFolder)) {
-			// 获取相对于同步文件夹的路径
-			const relativePath = normalizedPath.substring(syncFolder.length + 1);
-			const parts = relativePath.split("/");
-
-			// 从直接父目录向上查找，找到第一个有同步记录的页面
-			if (parts.length > 1) {
-				// 文件在子目录中，查找同名 .md 文件对应的页面
-				const parentDirName = parts[parts.length - 2]; // 直接父目录名
-				const allStates = this.stateManager.getData().syncState;
-
-				for (const pageId in allStates) {
-					const state = allStates[pageId];
-					const statePath = normalizePath(state.localPath);
-					// 查找 localPath 以相同目录名结尾的已同步页面
-					// 例如：syncFolder/产品文档/产品文档.md → 产品文档 目录
-					const stateFileName = statePath.split("/").pop()?.replace(".md", "") || "";
-					const stateDir = statePath.split("/").slice(-2, -1)[0] || "";
-					if (stateDir === parentDirName && stateFileName === parentDirName) {
-						console.log(`[Confluence Sync] 目录反推: ${parentDirName} → pageId ${pageId}`);
-						return pageId;
-					}
-				}
-			}
-		}
-
-		// 优先级 3：使用第一个 Root Page ID 作为默认父页面
-		const rootIds = this.parseRootPageIds(this.settings.rootPageIds);
-		if (rootIds.length > 0) {
-			console.log(`[Confluence Sync] 使用默认 Root Page: ${rootIds[0]}`);
-			return rootIds[0];
-		}
-
-		return null;
 	}
 
 	/**

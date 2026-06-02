@@ -9,7 +9,7 @@
  * - 支持附件下载
  * - 使用 Turndown 转换 HTML 到 Markdown
  */
-import { Plugin, Notice, TAbstractFile, TFile, addIcon } from "obsidian";
+import { Plugin, Notice } from "obsidian";
 import {
 	ConfluenceSyncSettings,
 	DEFAULT_SETTINGS,
@@ -203,23 +203,6 @@ export default class ConfluenceSyncPlugin extends Plugin {
 				return true;
 			},
 		});
-
-		// 推送当前页面到 Confluence（仅新建）
-		this.addCommand({
-			id: "push-to-confluence",
-			name: "推送当前页面到 Confluence",
-			checkCallback: (checking: boolean) => {
-				const activeFile = this.app.workspace.getActiveFile();
-				if (!activeFile || activeFile.extension !== "md") return false;
-				// 已有 confluence_page_id 的不允许推送（防止覆盖）
-				const cache = this.app.metadataCache.getFileCache(activeFile);
-				if (cache?.frontmatter?.confluence_page_id) return false;
-				if (!checking) {
-					this.pushCurrentPage();
-				}
-				return true;
-			},
-		});
 	}
 
 	/**
@@ -307,101 +290,6 @@ export default class ConfluenceSyncPlugin extends Plugin {
 			notice.hide();
 			new Notice(`❌ 同步错误: ${error.message}`, 5000);
 		}
-	}
-
-	/**
-	 * 推送当前页面到 Confluence（创建新页面）
-	 */
-	async pushCurrentPage(): Promise<void> {
-		const activeFile = this.app.workspace.getActiveFile();
-		if (!activeFile) {
-			new Notice("❌ 没有打开的文件");
-			return;
-		}
-
-		if (!this.validateSettingsForPush()) return;
-
-		const cache = this.app.metadataCache.getFileCache(activeFile);
-		const frontmatter = cache?.frontmatter;
-
-		// 确认操作
-		const confirmed = confirm(
-			`确定要将「${activeFile.basename}」发布到 Confluence 吗？\n\n` +
-			`Space: ${this.settings.spaceKey}\n` +
-			`将创建为新页面，不会覆盖已有页面。`
-		);
-		if (!confirmed) return;
-
-		const notice = new Notice(`📤 正在推送「${activeFile.basename}」到 Confluence...`, 0);
-		try {
-			const content = await this.app.vault.read(activeFile);
-			const result = await this.syncService.pushToConfluence(
-				activeFile.path,
-				activeFile.basename,
-				content,
-				frontmatter
-			);
-			notice.hide();
-
-			if (result.success) {
-				// 在文件的 frontmatter 中写回 confluence_page_id
-				await this.writeBackPageId(activeFile, result.pageId!, result.pageUrl!);
-				new Notice(`✅ 已发布到 Confluence\n页面 ID: ${result.pageId}`, 8000);
-			} else {
-				new Notice(`❌ 推送失败: ${result.error}`, 5000);
-			}
-		} catch (error) {
-			notice.hide();
-			new Notice(`❌ 推送错误: ${error.message}`, 5000);
-		}
-	}
-
-	/**
-	 * 推送成功后回写 Confluence 信息到 frontmatter
-	 */
-	private async writeBackPageId(file: TFile, pageId: string, pageUrl: string): Promise<void> {
-		try {
-			let content = await this.app.vault.read(file);
-			const hasFrontmatter = content.startsWith("---\n");
-
-			if (hasFrontmatter) {
-				// 在现有 frontmatter 中追加字段
-				content = content.replace(
-					/^---\n/,
-					`---\nconfluence_page_id: "${pageId}"\nconfluence_url: "${pageUrl}"\n`
-				);
-			} else {
-				// 创建新的 frontmatter
-				content = `---\nconfluence_page_id: "${pageId}"\nconfluence_url: "${pageUrl}"\n---\n${content}`;
-			}
-
-			await this.app.vault.modify(file, content);
-		} catch (error) {
-			console.error("[Confluence Sync] 回写 frontmatter 失败:", error);
-		}
-	}
-
-	/**
-	 * 验证推送所需的设置
-	 */
-	private validateSettingsForPush(): boolean {
-		if (!this.settings.confluenceBaseUrl) {
-			new Notice("❌ 请在设置中配置 Confluence 地址");
-			return false;
-		}
-		if (!this.settings.username || !this.settings.password) {
-			new Notice("❌ 请在设置中配置用户名和密码");
-			return false;
-		}
-		if (!this.settings.spaceKey) {
-			new Notice("❌ 请在设置中配置 Space Key（推送需要）");
-			return false;
-		}
-		if (!this.settings.rootPageIds.trim()) {
-			new Notice("❌ 请在设置中配置根页面 ID（用于确定父页面）");
-			return false;
-		}
-		return true;
 	}
 
 	/**

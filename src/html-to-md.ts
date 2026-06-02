@@ -216,6 +216,120 @@ export class HtmlToMarkdownConverter {
 	}
 
 	/**
+	 * 将 HTML 中的所有 <table> 转为 GFM Markdown 表格，替换为 %%CFLTBL%% 占位符。
+	 * 在宏/图片/链接预处理之后调用，此时单元格内已是占位符或行内 HTML。
+	 * @returns 替换后的 html 及占位符 → 表格 Markdown 的映射
+	 */
+	extractTablesToMarkdown(html: string): { html: string; tables: Map<string, string> } {
+		const tables = new Map<string, string>();
+		let idx = 0;
+		const out = html.replace(/<table[\s\S]*?<\/table>/gi, (match) => {
+			const placeholder = `%%CFLTBL${idx++}%%`;
+			try {
+				tables.set(placeholder, this.convertTableToMarkdown(match));
+			} catch (e) {
+				console.error("[Confluence Sync] 表格转换失败:", e);
+				tables.set(placeholder, "");
+			}
+			return placeholder;
+		});
+		return { html: out, tables };
+	}
+
+	/**
+	 * 将单张 <table> HTML 转为 GFM Markdown 表格。
+	 * 合并单元格(colspan/rowspan)拍平：左上首格放内容、其余被覆盖的格留空。
+	 */
+	private convertTableToMarkdown(tableHtml: string): string {
+		const doc = new DOMParser().parseFromString(tableHtml, "text/html");
+		const table = doc.querySelector("table");
+		if (!table) return "";
+
+		const rows = Array.from(table.querySelectorAll("tr"));
+		if (rows.length === 0) return "";
+
+		// 构建二维 grid，处理 colspan/rowspan 占位
+		const grid: string[][] = [];
+		const occupied: boolean[][] = [];
+		let maxCols = 0;
+
+		const ensure = (r: number) => {
+			if (!grid[r]) { grid[r] = []; occupied[r] = []; }
+		};
+
+		rows.forEach((tr, r) => {
+			ensure(r);
+			let c = 0;
+			const cells = Array.from(tr.children).filter(
+				(el) => el.tagName === "TD" || el.tagName === "TH"
+			);
+			for (const cell of cells) {
+				while (occupied[r][c]) c++;
+				const colspan = parseInt(cell.getAttribute("colspan") || "1", 10) || 1;
+				const rowspan = parseInt(cell.getAttribute("rowspan") || "1", 10) || 1;
+				grid[r][c] = this.convertTableCell((cell as HTMLElement).innerHTML);
+				for (let i = 0; i < rowspan; i++) {
+					for (let j = 0; j < colspan; j++) {
+						ensure(r + i);
+						occupied[r + i][c + j] = true;
+						if (grid[r + i][c + j] === undefined && !(i === 0 && j === 0)) {
+							grid[r + i][c + j] = "";
+						}
+					}
+				}
+				c += colspan;
+			}
+			if (c > maxCols) maxCols = c;
+		});
+		if (maxCols === 0) return "";
+
+		const renderRow = (arr: string[] = []): string => {
+			const cells: string[] = [];
+			for (let c = 0; c < maxCols; c++) {
+				const v = (arr[c] ?? "").trim();
+				cells.push(v === "" ? " " : v);
+			}
+			return "| " + cells.join(" | ") + " |";
+		};
+
+		const lines: string[] = [];
+		// 首行含 <th> 则作为表头，否则生成空表头（GFM 必须有表头行）
+		const firstRowHasTh = !!rows[0]?.querySelector("th");
+		const sep = "| " + Array(maxCols).fill("---").join(" | ") + " |";
+		let bodyStart = 0;
+		if (firstRowHasTh) {
+			lines.push(renderRow(grid[0]));
+			lines.push(sep);
+			bodyStart = 1;
+		} else {
+			lines.push("| " + Array(maxCols).fill(" ").join(" | ") + " |");
+			lines.push(sep);
+		}
+		for (let r = bodyStart; r < grid.length; r++) {
+			lines.push(renderRow(grid[r]));
+		}
+
+		// 前后留空行，保证 Obsidian 正确识别表格块
+		return "\n\n" + lines.join("\n") + "\n\n";
+	}
+
+	/**
+	 * 将单元格内 HTML 转为单行 Markdown：
+	 * 复用 Turndown 行内规则，再把换行折成 <br>、转义竖线、占位符原样穿过。
+	 */
+	private convertTableCell(cellHtml: string): string {
+		let md = this.convert(cellHtml);
+		md = md
+			.replace(/\r/g, "")
+			.replace(/\n{1,}/g, "<br>")   // 单元格内换行 → <br>
+			.replace(/\|/g, "\\|")          // 转义竖线，避免破坏表格
+			.replace(/(?:<br>)+$/g, "")
+			.replace(/^(?:<br>)+/g, "")
+			.trim();
+		return md;
+	}
+
+	/**
 	 * 生成带 YAML Frontmatter 的 Markdown 文档
 	 */
 	generateMarkdownWithFrontmatter(
@@ -225,22 +339,25 @@ export class HtmlToMarkdownConverter {
 			pageId: string;
 			version: number;
 			confluenceUrl: string;
+			updatedAt?: string;  // Confluence 原文最后修改时间（version.when）
 		}
 	): string {
 		// 转换正文
 		const body = this.convert(html);
 
 		// 构建 YAML Frontmatter
-		const frontmatter = [
+		const lines = [
 			"---",
 			`title: "${metadata.title}"`,
 			`confluence_page_id: "${metadata.pageId}"`,
 			`version: ${metadata.version}`,
 			`confluence_url: "${metadata.confluenceUrl}"`,
-			`synced_at: "${new Date().toISOString()}"`,
-			"---",
-			"",
-		].join("\n");
+		];
+		if (metadata.updatedAt) {
+			lines.push(`confluence_updated: "${metadata.updatedAt}"`);
+		}
+		lines.push(`synced_at: "${new Date().toISOString()}"`, "---", "");
+		const frontmatter = lines.join("\n");
 
 		return frontmatter + body;
 	}
