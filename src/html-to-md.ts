@@ -340,6 +340,8 @@ export class HtmlToMarkdownConverter {
 			version: number;
 			confluenceUrl: string;
 			updatedAt?: string;  // Confluence 原文最后修改时间（version.when）
+			creator?: string;    // Confluence 页面创建人
+			modifier?: string;   // Confluence 页面修改人
 		}
 	): string {
 		// 转换正文
@@ -353,6 +355,12 @@ export class HtmlToMarkdownConverter {
 			`version: ${metadata.version}`,
 			`confluence_url: "${metadata.confluenceUrl}"`,
 		];
+		if (metadata.creator) {
+			lines.push(`confluence_creator: "${metadata.creator}"`);
+		}
+		if (metadata.modifier) {
+			lines.push(`confluence_modifier: "${metadata.modifier}"`);
+		}
 		if (metadata.updatedAt) {
 			lines.push(`confluence_updated: "${metadata.updatedAt}"`);
 		}

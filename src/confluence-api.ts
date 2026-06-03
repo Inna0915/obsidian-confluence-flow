@@ -5,12 +5,31 @@
 import { requestUrl, RequestUrlResponse, Notice } from "obsidian";
 
 /**
+ * Confluence 用户信息
+ */
+export interface ConfluenceUser {
+	type: string;
+	username?: string;
+	userKey?: string;
+	displayName?: string;
+}
+
+/**
+ * Confluence 历史纪录（创建信息）
+ */
+export interface ConfluenceHistory {
+	createdBy: ConfluenceUser;
+	createdDate: string;
+}
+
+/**
  * Confluence 页面版本信息
  */
 export interface ConfluenceVersion {
 	number: number;
 	when: string;
 	message?: string;
+	by?: ConfluenceUser;
 }
 
 /**
@@ -44,6 +63,7 @@ export interface ConfluencePage {
 	version: ConfluenceVersion;
 	ancestors: ConfluenceAncestor[];
 	body: ConfluenceBody;
+	history?: ConfluenceHistory;
 	// 扩展字段
 	children?: {
 		attachment?: {
@@ -276,7 +296,7 @@ export class ConfluenceApiClient {
 		const baseUrl = this.getCleanBaseUrl();
 		const encodedCql = encodeURIComponent(cql);
 		// expand 参数不使用 encodeURIComponent，因为逗号需要保留
-		const expand = "body.storage,version,ancestors,children.attachment";
+		const expand = "body.storage,version,ancestors,children.attachment,history";
 		const url = `${baseUrl}/rest/api/content/search?cql=${encodedCql}&expand=${expand}&start=${start}&limit=${limit}`;
 
 		console.log("[Confluence Sync] CQL:", cql);
@@ -291,7 +311,7 @@ export class ConfluenceApiClient {
 	 */
 	async getPage(pageId: string): Promise<ConfluencePage> {
 		const baseUrl = this.getCleanBaseUrl();
-		const expand = "body.storage,version,ancestors,children.attachment";
+		const expand = "body.storage,version,ancestors,children.attachment,history";
 		const url = `${baseUrl}/rest/api/content/${pageId}?expand=${expand}`;
 
 		const response = await this.request(url);

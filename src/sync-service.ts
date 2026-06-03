@@ -626,6 +626,24 @@ export class SyncService {
 		// 3. Turndown 转换
 		const confluenceUrl = `${this.settings.confluenceBaseUrl}/pages/viewpage.action?pageId=${page.id}`;
 
+		// 提取创建人
+		let creator = "";
+		if (page.history?.createdBy) {
+			const cb = page.history.createdBy;
+			creator = cb.displayName && cb.username 
+				? `${cb.displayName} (${cb.username})` 
+				: (cb.displayName || cb.username || "");
+		}
+
+		// 提取修改人
+		let modifier = "";
+		if (page.version?.by) {
+			const mb = page.version.by;
+			modifier = mb.displayName && mb.username 
+				? `${mb.displayName} (${mb.username})` 
+				: (mb.displayName || mb.username || "");
+		}
+
 		let markdownContent = this.htmlConverter.generateMarkdownWithFrontmatter(
 			htmlContent,
 			{
@@ -634,6 +652,8 @@ export class SyncService {
 				version: page.version.number,
 				confluenceUrl,
 				updatedAt: page.version.when,
+				creator,
+				modifier,
 			}
 		);
 
